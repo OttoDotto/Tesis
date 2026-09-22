@@ -4,7 +4,8 @@ import SoapySDR
 
 from SoapySDR import (
     SOAPY_SDR_TX,
-    SOAPY_SDR_CF32
+    SOAPY_SDR_CF32,
+    SOAPY_SDR_END_BURST
 )
 
 from config import (
@@ -29,9 +30,20 @@ from funciones_dsss import (
 )
 
 from paquete import (
+    armar_paquete, 
     describir_paquete
 )
 
+# ============================================================
+# CONFIGURACIÓN DE TRANSMISIÓN
+# ============================================================
+
+INTERVALO_PAQUETES = 0.5
+
+
+# ============================================================
+# MODULACIÓN BPSK
+# ============================================================
 
 def generar_bpsk(bits):
 
@@ -50,61 +62,12 @@ def generar_bpsk(bits):
 
 
 # ============================================================
-# DATOS
-# ============================================================
-
-datos = cargar_datos(
-    origen=ORIGEN_DATOS
-)
-
-bits_datos = np.unpackbits(
-    np.frombuffer(
-        datos,
-        dtype=np.uint8
-    )
-).astype(int)
-
-
-# ============================================================
 # CÓDIGO PN
 # ============================================================
 
 pn_bipolar = generar_codigo_pn(
     TAPS_PN,
     LONGITUD_PN
-)
-
-
-# ============================================================
-# DSSS
-# ============================================================
-
-chips_dsss = ensanchar(
-    bits_datos,
-    pn_bipolar
-)
-
-
-# Convertimos los chips ±1 a bits 0/1
-# para reutilizar el modulador BPSK
-bits_chips = (
-    (chips_dsss + 1) // 2
-).astype(int)
-
-bits_chips = "".join(
-    str(int(bit))
-    for bit in bits_chips
-)
-
-
-# ============================================================
-# TRAMA
-# ============================================================
-
-BITS_TX = (
-    PREAMBULO
-    + bits_chips
-    + GUARDA
 )
 
 
@@ -151,23 +114,12 @@ sdr.activateStream(
 
 
 # ============================================================
-# SEÑAL BPSK
-# ============================================================
-
-senal = generar_bpsk(
-    BITS_TX
-).astype(
-    np.complex64
-)
-
-
-# ============================================================
 # INFORMACIÓN
 # ============================================================
 
 print()
 print("============================================")
-print("TRANSMISOR DSSS-BPSK - DATOS REALES")
+print("TRANSMISOR DSSS-BPSK - DATOS CONTINUOS")
 print("============================================")
 
 print(
@@ -188,139 +140,132 @@ print(
     f"Antena     : {ANTENA_TX}"
 )
 
-print()
-
 print(
     f"Origen datos: {ORIGEN_DATOS}"
 )
 
-print()
-
-print("DATOS A TRANSMITIR")
-print("--------------------------------------------")
-
 print(
-    describir_paquete(
-        datos
-    )
-)
-
-print(
-    f"Bytes: {datos.hex()}"
-)
-
-print(
-    "Bits originales:"
-)
-
-print(
-    "".join(
-        str(int(bit))
-        for bit in bits_datos
-    )
+    f"Intervalo  : {INTERVALO_PAQUETES:.2f} s"
 )
 
 print()
-
-print("DSSS")
-print("--------------------------------------------")
-
-print(
-    f"Longitud PN : {LONGITUD_PN} chips"
-)
-
-print(
-    f"Taps PN     : {TAPS_PN}"
-)
-
-print(
-    f"Bits datos  : {len(bits_datos)}"
-)
-
-print(
-    f"Chips DSSS  : {len(chips_dsss)}"
-)
-
-print()
-
-print("TRAMA")
-print("--------------------------------------------")
-
-print(
-    f"Preámbulo   : {len(PREAMBULO)} bits"
-)
-
-print(
-    f"Datos DSSS  : {len(chips_dsss)} chips"
-)
-
-print(
-    f"Guarda      : {len(GUARDA)} bits"
-)
-
-print(
-    f"Total TX    : {len(BITS_TX)} símbolos"
-)
-
-print()
-
-print(
-    f"Muestras    : {len(senal)}"
-)
-
-print(
-    f"Duración    : "
-    f"{len(senal) / SAMPLE_RATE * 1e3:.3f} ms"
-)
-
-print()
-
-print("Transmitiendo un solo paquete...")
+print("Transmitiendo paquetes continuamente.")
+print("Presioná Ctrl+C para detener.")
 print()
 
 
 # ============================================================
-# TRANSMISIÓN
+# TRANSMISIÓN CONTINUA
 # ============================================================
+
+contador_paquetes = 0
 
 try:
+    while True:
+        datos_sensor = cargar_datos(origen=ORIGEN_DATOS)
 
-    offset = 0
+        contador_paquetes += 1
+        datos = armar_paquete(contador_paquetes, datos_sensor)
 
-    while offset < len(senal):
+        bits_datos = np.unpackbits(np.frombuffer(datos, dtype=np.uint8)).astype(int)
 
-        resultado = sdr.writeStream(
-            stream,
-            [senal[offset:]],
-            len(senal) - offset
+        # ----------------------------------------------------
+        # DSSS
+        # ----------------------------------------------------
+
+        chips_dsss = ensanchar(
+            bits_datos,
+            pn_bipolar
         )
 
-        if resultado.ret < 0:
+        bits_chips = (
+            (chips_dsss + 1) // 2
+        ).astype(int)
 
-            print(
-                f"Error TX: {resultado.ret}"
+        bits_chips = "".join(
+            str(int(bit))
+            for bit in bits_chips
+        )
+
+        # ----------------------------------------------------
+        # Trama
+        # ----------------------------------------------------
+
+        bits_tx = (
+            PREAMBULO
+            + bits_chips
+            + GUARDA
+        )
+
+        # ----------------------------------------------------
+        # BPSK
+        # ----------------------------------------------------
+
+        senal = generar_bpsk(
+            bits_tx
+        ).astype(
+            np.complex64
+        )
+
+        # ----------------------------------------------------
+        # Mostrar paquete
+        # ----------------------------------------------------
+
+        print(f"[TX {contador_paquetes:04d}] {describir_paquete(datos)}")
+        print(f"          Bytes: {datos.hex()}")
+
+        # ----------------------------------------------------
+        # Transmitir trama
+        # ----------------------------------------------------
+
+        offset = 0
+
+        while offset < len(senal):
+
+            resultado = sdr.writeStream(
+                stream,
+                [senal[offset:]],
+                len(senal) - offset
             )
 
-            break
+            if resultado.ret < 0:
 
-        offset += resultado.ret
+                print(
+                    f"Error TX: {resultado.ret}"
+                )
 
-    print(
-        f"Paquete transmitido: "
-        f"{offset} muestras"
-    )
+                break
 
-    print()
-    print("TX terminado.")
-    print("Presioná Ctrl+C para salir.")
+            offset += resultado.ret
 
-    while True:
-        time.sleep(1)
+        # ----------------------------------------------------
+        # Finalizar ráfaga
+        # ----------------------------------------------------
+
+        sdr.writeStream(
+            stream,
+            [np.zeros(
+                1,
+                dtype=np.complex64
+            )],
+            1,
+            flags=SOAPY_SDR_END_BURST
+        )
+
+        # ----------------------------------------------------
+        # Esperar antes del próximo paquete
+        # ----------------------------------------------------
+
+        time.sleep(
+            INTERVALO_PAQUETES
+        )
+
 
 except KeyboardInterrupt:
 
     print()
     print("TX detenido.")
+
 
 finally:
 

@@ -3,7 +3,9 @@
 # ============================================================
 
 ORIGEN_DATOS = "aleatorio"
+
 PUERTO_SERIAL = "/dev/ttyACM0"
+
 BAUDRATE = 9600
 
 
@@ -12,15 +14,8 @@ BAUDRATE = 9600
 # ============================================================
 
 PREAMBULO = "11010011100101101101000110111010"
+
 GUARDA = "1" * 128
-
-
-# ============================================================
-# DSSS
-# ============================================================
-
-LONGITUD_PN = 63
-TAPS_PN = [6, 1]
 
 
 # ============================================================
@@ -29,11 +24,13 @@ TAPS_PN = [6, 1]
 
 USAR_SDR = True
 
-FREQ_CENTRAL = 920e6
+FREQ_CENTRAL = 919.5e6
+
 SAMPLE_RATE = 1e6
 
 GANANCIA_TX = 40
-GANANCIA_RX = 55
+
+GANANCIA_RX = 40
 
 MUESTRAS_RX = 200000
 
@@ -42,6 +39,7 @@ SDR_ARGS = "driver=uhd"
 CANAL_SDR = 0
 
 ANTENA_TX = "TX/RX"
+
 ANTENA_RX = "TX/RX"
 
 
@@ -57,4 +55,5 @@ MUESTRAS_POR_BIT = 8
 # ============================================================
 
 UMBRAL_NIVEL = 0.01
+
 UMBRAL_CORRELACION = 0.70

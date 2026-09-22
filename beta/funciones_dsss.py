@@ -80,65 +80,6 @@ def despreader(señal, pn_bipolar):
     return bits_recuperados, correlaciones
 
 
-def refinar_fase(simbolos_datos, pn_bipolar):
-    """
-    Estima y corrige la pendiente de fase residual usando los
-    propios datos DSSS (mucho más largos que el preámbulo).
-
-    Eleva al cuadrado las correlaciones complejas por bit para
-    eliminar la modulación BPSK (±1 -> +1) y deja solo el giro
-    de fase residual. Se corrige SOLO la pendiente: la fase
-    absoluta ya viene bien del preámbulo, y el cuadrado tiene
-    ambigüedad de 180 grados.
-    """
-
-    n_chips = len(pn_bipolar)
-
-    n_bits = len(simbolos_datos) // n_chips
-
-    bloques = simbolos_datos[
-        :n_bits * n_chips
-    ].reshape(n_bits, n_chips)
-
-    # Correlación COMPLEJA por bit (no solo la parte real)
-    correlaciones = bloques @ pn_bipolar
-
-    fase_doble = np.unwrap(
-        np.angle(correlaciones ** 2)
-    )
-
-    indices_bits = np.arange(
-        n_bits,
-        dtype=np.float64
-    )
-
-    pesos = np.maximum(
-        np.abs(correlaciones) ** 2,
-        1e-12
-    )
-
-    pendiente_doble, _ = np.polyfit(
-        indices_bits,
-        fase_doble,
-        1,
-        w=pesos
-    )
-
-    pendiente_bit = pendiente_doble / 2.0
-    pendiente_chip = pendiente_bit / n_chips
-
-    indices_chips = np.arange(
-        len(simbolos_datos),
-        dtype=np.float64
-    )
-
-    corregidos = simbolos_datos * np.exp(
-        -1j * pendiente_chip * indices_chips
-    )
-
-    return corregidos, pendiente_chip
-
-
 # --- Modulación / Demodulación (pulse shaping, TX y RX) ---
 
 def filtro_rrc(beta, sps, n_taps):

@@ -1,4 +1,3 @@
-import time
 import numpy as np
 import SoapySDR
 
@@ -25,66 +24,50 @@ from config import (
 
 from paquete import (
     TAMAÑO_PAQUETE_BYTES,
+    interpretar_paquete,
     describir_paquete,
-    generar_paquete_ejemplo
+    LUZ_MAX,
+    LUZ_MIN,
+    TEMPERATURA_MAX,
+    TEMPERATURA_MIN,
+    HUMEDAD_MAX,
+    HUMEDAD_MIN
 )
 
 from funciones_dsss import (
     generar_codigo_pn,
-    despreader
+    despreader,
+    refinar_fase
 )
-
 
 # ============================================================
 # CONSTANTES
 # ============================================================
 
-CANTIDAD_BITS_DATOS = (
-    TAMAÑO_PAQUETE_BYTES * 8
-)
-
-CANTIDAD_CHIPS_DATOS = (
-    CANTIDAD_BITS_DATOS
-    * LONGITUD_PN
-)
-
+CANTIDAD_BITS_DATOS = TAMAÑO_PAQUETE_BYTES * 8
+CANTIDAD_CHIPS_DATOS = CANTIDAD_BITS_DATOS * LONGITUD_PN
+CANTIDAD_SIMBOLOS_TRAMA = len(PREAMBULO) + CANTIDAD_CHIPS_DATOS + len(GUARDA)
+MUESTRAS_TRAMA = CANTIDAD_SIMBOLOS_TRAMA * MUESTRAS_POR_BIT
 
 PREAMBULO_SIMBOLOS = np.array(
-    [
-        1.0 if bit == "1" else -1.0
-        for bit in PREAMBULO
-    ],
+    [1.0 if bit == "1" else -1.0 for bit in PREAMBULO],
     dtype=np.float32
 )
-
 
 # ============================================================
 # CÓDIGO PN
 # ============================================================
 
-pn_bipolar = generar_codigo_pn(
-    TAPS_PN,
-    LONGITUD_PN
-)
+pn_bipolar = generar_codigo_pn(TAPS_PN, LONGITUD_PN)
 
 
 # ============================================================
-# PAQUETE ESPERADO
+# MEDICIÓN DE NIVEL
 # ============================================================
 
-# Durante esta prueba usamos ORIGEN_DATOS = "ejemplo"
-# para tener un paquete conocido.
-
-datos_esperados = generar_paquete_ejemplo(
-    aleatorio=False
-)
-
-bits_esperados = np.unpackbits(
-    np.frombuffer(
-        datos_esperados,
-        dtype=np.uint8
-    )
-).astype(int)
+def calcular_nivel_db(muestras):
+    potencia = np.mean(np.abs(muestras) ** 2)
+    return 10.0 * np.log10(max(potencia, 1e-12))
 
 
 # ============================================================
@@ -92,367 +75,138 @@ bits_esperados = np.unpackbits(
 # ============================================================
 
 def buscar_preambulo(muestras):
-
     mejor_correlacion = -1.0
     mejor_inicio = None
-
-    referencia = PREAMBULO_SIMBOLOS.astype(
-        np.complex64
-    )
-
+    referencia = PREAMBULO_SIMBOLOS.astype(np.complex64)
     longitud = len(PREAMBULO)
 
     for offset in range(MUESTRAS_POR_BIT):
-
         muestras_offset = muestras[offset:]
-
-        cantidad_simbolos = (
-            len(muestras_offset)
-            // MUESTRAS_POR_BIT
-        )
+        cantidad_simbolos = len(muestras_offset) // MUESTRAS_POR_BIT
 
         if cantidad_simbolos < longitud:
             continue
 
-        muestras_offset = muestras_offset[
-            :cantidad_simbolos * MUESTRAS_POR_BIT
-        ]
+        muestras_offset = muestras_offset[:cantidad_simbolos * MUESTRAS_POR_BIT]
+        bloques = muestras_offset.reshape(cantidad_simbolos, MUESTRAS_POR_BIT)
+        simbolos = np.mean(bloques, axis=1)
 
-        bloques = muestras_offset.reshape(
-            cantidad_simbolos,
-            MUESTRAS_POR_BIT
-        )
-
-        simbolos = np.mean(
-            bloques,
-            axis=1
-        )
-
-        correlaciones = np.correlate(
-            simbolos,
-            referencia,
-            mode="valid"
-        )
-
+        correlaciones = np.correlate(simbolos, referencia, mode="valid")
         energia_rx = np.convolve(
             np.abs(simbolos) ** 2,
-            np.ones(
-                longitud,
-                dtype=np.float32
-            ),
+            np.ones(longitud, dtype=np.float32),
             mode="valid"
         )
+        energia_ref = np.sum(np.abs(referencia) ** 2)
+        denominador = np.sqrt(energia_rx * energia_ref)
+        correlaciones_normalizadas = np.abs(correlaciones) / np.maximum(denominador, 1e-12)
 
-        energia_ref = np.sum(
-            np.abs(referencia) ** 2
-        )
-
-        denominador = np.sqrt(
-            energia_rx * energia_ref
-        )
-
-        correlaciones_normalizadas = (
-            np.abs(correlaciones)
-            / np.maximum(
-                denominador,
-                1e-12
-            )
-        )
-
-        indice = np.argmax(
-            correlaciones_normalizadas
-        )
-
-        correlacion = (
-            correlaciones_normalizadas[indice]
-        )
+        indice = np.argmax(correlaciones_normalizadas)
+        correlacion = correlaciones_normalizadas[indice]
 
         if correlacion > mejor_correlacion:
-
             mejor_correlacion = correlacion
-
-            mejor_inicio = (
-                offset
-                + indice * MUESTRAS_POR_BIT
-            )
+            mejor_inicio = offset + indice * MUESTRAS_POR_BIT
 
     if mejor_inicio is None:
-
         return None, None
 
-    return (
-        mejor_correlacion,
-        mejor_inicio
-    )
+    return mejor_correlacion, mejor_inicio
 
 
 # ============================================================
 # ESTIMACIÓN DE OFFSET DE FRECUENCIA
 # ============================================================
 
-def estimar_offset_frecuencia(
-    simbolos_preambulo
-):
+def estimar_offset_frecuencia(simbolos_preambulo):
+    corregidos = simbolos_preambulo * PREAMBULO_SIMBOLOS
+    fases = np.unwrap(np.angle(corregidos))
+    indices = np.arange(len(fases), dtype=np.float64)
+    pesos = np.maximum(np.abs(corregidos) ** 2, 1e-12)
 
-    corregidos = (
-        simbolos_preambulo
-        * PREAMBULO_SIMBOLOS
-    )
+    pendiente, fase_inicial = np.polyfit(indices, fases, 1, w=pesos)
 
-    fases = np.unwrap(
-        np.angle(corregidos)
-    )
+    tasa_simbolos = SAMPLE_RATE / MUESTRAS_POR_BIT
+    frecuencia_offset = pendiente * tasa_simbolos / (2.0 * np.pi)
 
-    indices = np.arange(
-        len(fases),
-        dtype=np.float64
-    )
-
-    pesos = np.maximum(
-        np.abs(corregidos) ** 2,
-        1e-12
-    )
-
-    pendiente, fase_inicial = np.polyfit(
-        indices,
-        fases,
-        1,
-        w=pesos
-    )
-
-    tasa_simbolos = (
-        SAMPLE_RATE
-        / MUESTRAS_POR_BIT
-    )
-
-    frecuencia_offset = (
-        pendiente
-        * tasa_simbolos
-        / (2.0 * np.pi)
-    )
-
-    return (
-        pendiente,
-        fase_inicial,
-        frecuencia_offset
-    )
+    return pendiente, fase_inicial, frecuencia_offset
 
 
 # ============================================================
 # ANÁLISIS DE TRAMA
 # ============================================================
 
-def analizar_trama(
-    muestras,
-    inicio
-):
-
-    cantidad_simbolos = (
-        len(PREAMBULO)
-        + CANTIDAD_CHIPS_DATOS
-        + len(GUARDA)
-    )
-
-    cantidad_muestras = (
-        cantidad_simbolos
-        * MUESTRAS_POR_BIT
-    )
-
-    fin = inicio + cantidad_muestras
+def analizar_trama(muestras, inicio):
+    fin = inicio + MUESTRAS_TRAMA
 
     if inicio < 0 or fin > len(muestras):
-
         return None
 
-    # --------------------------------------------------------
-    # Extraer trama
-    # --------------------------------------------------------
+    trama = muestras[inicio:fin]
+    nivel_db = calcular_nivel_db(trama)
 
-    trama = muestras[
-        inicio:fin
-    ]
-
-    # --------------------------------------------------------
-    # Convertir muestras a símbolos/chips
-    # --------------------------------------------------------
-
-    bloques = trama.reshape(
-        cantidad_simbolos,
-        MUESTRAS_POR_BIT
-    )
-
-    simbolos = np.mean(
-        bloques,
-        axis=1
-    )
+    bloques = trama.reshape(CANTIDAD_SIMBOLOS_TRAMA, MUESTRAS_POR_BIT)
+    simbolos = np.mean(bloques, axis=1)
 
     n_preambulo = len(PREAMBULO)
+    simbolos_preambulo = simbolos[:n_preambulo]
 
-    simbolos_preambulo = (
-        simbolos[
-            :n_preambulo
-        ]
-    )
+    pendiente_fase, fase_inicial, frecuencia_offset = estimar_offset_frecuencia(simbolos_preambulo)
 
-    # --------------------------------------------------------
-    # Estimar fase y offset de frecuencia
-    # usando solamente el preámbulo
-    # --------------------------------------------------------
+    indices_simbolos = np.arange(CANTIDAD_SIMBOLOS_TRAMA, dtype=np.float64)
+    fase_simbolos = fase_inicial + pendiente_fase * indices_simbolos
+    simbolos_corregidos = simbolos * np.exp(-1j * fase_simbolos)
 
-    (
-        pendiente_fase,
-        fase_inicial,
-        frecuencia_offset
-    ) = estimar_offset_frecuencia(
-        simbolos_preambulo
-    )
+    simbolos_datos = simbolos_corregidos[n_preambulo:n_preambulo + CANTIDAD_CHIPS_DATOS]
 
-    # --------------------------------------------------------
-    # CORRECCIÓN DE FASE
-    # --------------------------------------------------------
+    simbolos_datos, pendiente_residual = refinar_fase(simbolos_datos, pn_bipolar)
 
-    indices_simbolos = np.arange(
-        cantidad_simbolos,
-        dtype=np.float64
-    )
-
-    fase_simbolos = (
-        fase_inicial
-        + pendiente_fase * indices_simbolos
-    )
-
-    simbolos_corregidos = (
-        simbolos
-        * np.exp(-1j * fase_simbolos)
-    )
-
-    # --------------------------------------------------------
-    # Separar las tres partes
-    # --------------------------------------------------------
-
-    simbolos_preambulo = (
-        simbolos_corregidos[
-            :n_preambulo
-        ]
-    )
-
-    simbolos_datos = (
-        simbolos_corregidos[
-            n_preambulo:
-            n_preambulo + CANTIDAD_CHIPS_DATOS
-        ]
-    )
-
-    simbolos_guarda = (
-        simbolos_corregidos[
-            n_preambulo + CANTIDAD_CHIPS_DATOS:
-        ]
-    )
-
-    # --------------------------------------------------------
-    # Demodular preámbulo
-    # --------------------------------------------------------
-
-    bits_preambulo = "".join(
-        "1" if np.real(simbolo) >= 0 else "0"
-        for simbolo in simbolos_preambulo
-    )
-
-    errores_preambulo = sum(
-        a != b
-        for a, b in zip(
-            bits_preambulo,
-            PREAMBULO
-        )
-    )
-
-    # --------------------------------------------------------
-    # DESPREADING
-    # --------------------------------------------------------
-
-    bits_datos, correlaciones_dsss = despreader(
-        simbolos_datos,
-        pn_bipolar
-    )
-
-    # --------------------------------------------------------
-    # Guarda
-    # --------------------------------------------------------
-
-    bits_guarda = "".join(
-        "1" if np.real(simbolo) >= 0 else "0"
-        for simbolo in simbolos_guarda
-    )
+    bits_datos, _ = despreader(simbolos_datos, pn_bipolar)
 
     return {
-        "bits_preambulo":
-            bits_preambulo,
-
-        "errores_preambulo":
-            errores_preambulo,
-
-        "chips_recibidos":
-            len(simbolos_datos),
-
-        "bits_datos":
-            bits_datos,
-
-        "correlaciones_dsss":
-            correlaciones_dsss,
-
-        "bits_guarda":
-            bits_guarda,
-
-        "pendiente_fase":
-            pendiente_fase,
-
-        "fase_inicial":
-            fase_inicial,
-
-        "frecuencia_offset":
-            frecuencia_offset
+        "bits_datos": bits_datos,
+        "nivel_db": nivel_db,
+        "pendiente_residual": pendiente_residual,
+        "pendiente_fase": pendiente_fase,
+        "fase_inicial": fase_inicial,
+        "frecuencia_offset": frecuencia_offset
     }
+
+
+# ============================================================
+# VALIDAR PAQUETE
+# ============================================================
+
+def validar_paquete(datos):
+    if len(datos) != TAMAÑO_PAQUETE_BYTES:
+        return False
+    try:
+        numero, temperatura, humedad, luz = interpretar_paquete(datos)
+    except ValueError:
+        return False
+    if not np.isfinite(temperatura) or not np.isfinite(humedad):
+        return False
+    if not (TEMPERATURA_MIN <= temperatura <= TEMPERATURA_MAX):
+        return False
+    if not (HUMEDAD_MIN <= humedad <= HUMEDAD_MAX):
+        return False
+    if not (LUZ_MIN <= luz <= LUZ_MAX):
+        return False
+    return True
+
 
 # ============================================================
 # SDR
 # ============================================================
 
-sdr = SoapySDR.Device(
-    "driver=uhd"
-)
+sdr = SoapySDR.Device("driver=uhd")
+sdr.setSampleRate(SOAPY_SDR_RX, CANAL_SDR, SAMPLE_RATE)
+sdr.setFrequency(SOAPY_SDR_RX, CANAL_SDR, FREQ_CENTRAL)
+sdr.setGain(SOAPY_SDR_RX, CANAL_SDR, GANANCIA_RX)
+sdr.setAntenna(SOAPY_SDR_RX, CANAL_SDR, ANTENA_RX)
 
-sdr.setSampleRate(
-    SOAPY_SDR_RX,
-    CANAL_SDR,
-    SAMPLE_RATE
-)
-
-sdr.setFrequency(
-    SOAPY_SDR_RX,
-    CANAL_SDR,
-    FREQ_CENTRAL
-)
-
-sdr.setGain(
-    SOAPY_SDR_RX,
-    CANAL_SDR,
-    GANANCIA_RX
-)
-
-sdr.setAntenna(
-    SOAPY_SDR_RX,
-    CANAL_SDR,
-    ANTENA_RX
-)
-
-stream = sdr.setupStream(
-    SOAPY_SDR_RX,
-    SOAPY_SDR_CF32
-)
-
-sdr.activateStream(
-    stream
-)
+stream = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
+sdr.activateStream(stream)
 
 
 # ============================================================
@@ -461,71 +215,55 @@ sdr.activateStream(
 
 print()
 print("============================================")
-print("RECEPTOR DSSS-BPSK - DATOS REALES")
+print("RECEPTOR DSSS-BPSK - ENSAYO DE DISTANCIA")
 print("============================================")
-
-print(
-    f"Frecuencia : "
-    f"{FREQ_CENTRAL / 1e6:.3f} MHz"
-)
-
-print(
-    f"Sample rate: "
-    f"{SAMPLE_RATE / 1e6:.3f} Msps"
-)
-
-print(
-    f"Ganancia   : {GANANCIA_RX}"
-)
-
-print(
-    f"Antena     : {ANTENA_RX}"
-)
-
+print(f"Frecuencia : {FREQ_CENTRAL / 1e6:.3f} MHz")
+print(f"Sample rate: {SAMPLE_RATE / 1e6:.3f} Msps")
+print(f"Ganancia RX: {GANANCIA_RX}")
+print(f"Antena     : {ANTENA_RX}")
 print()
-
-print(
-    f"Preámbulo  : {len(PREAMBULO)} bits"
-)
-
-print(
-    f"Datos      : {CANTIDAD_BITS_DATOS} bits"
-)
-
-print(
-    f"PN         : {LONGITUD_PN} chips/bit"
-)
-
-print(
-    f"Chips datos: {CANTIDAD_CHIPS_DATOS}"
-)
-
-print(
-    f"Guarda     : {len(GUARDA)} bits"
-)
-
-print()
-
-print("PAQUETE ESPERADO")
+print("RANGOS VÁLIDOS")
 print("--------------------------------------------")
-
-print(
-    describir_paquete(
-        datos_esperados
-    )
-)
-
-print(
-    f"Bytes esperados: "
-    f"{datos_esperados.hex()}"
-)
-
+print(f"Temperatura : {TEMPERATURA_MIN:.1f} a {TEMPERATURA_MAX:.1f} °C")
+print(f"Humedad     : {HUMEDAD_MIN:.1f} a {HUMEDAD_MAX:.1f} %")
+print(f"Luz         : {LUZ_MIN} a {LUZ_MAX}")
+print()
+print("MEDICIÓN DE NIVEL")
+print("--------------------------------------------")
+print("Nivel = potencia media de las muestras IQ")
+print("Escala relativa, no dBm calibrados.")
+print("Ganancia RX fija para comparar distancias.")
+print()
+print("Diagnóstico por paquete:")
+print("  Nro    = número de secuencia asignado por el TX")
+print("  Perd   = paquetes perdidos detectados (salto en Nro)")
+print("  Corr   = correlación normalizada del preámbulo (0 a 1)")
+print("  FOff   = offset de frecuencia estimado (Hz)")
+print()
+print("Esperando paquetes...")
 print()
 
-buffer_rx = np.zeros(
-    MUESTRAS_RX,
-    dtype=np.complex64
-)
+
+# ============================================================
+# BUFFER
+# ============================================================
+
+buffer_rx = np.zeros(MUESTRAS_RX, dtype=np.complex64)
+buffer_acumulado = np.zeros(0, dtype=np.complex64)
+
+
+# ============================================================
+# CONTADORES Y ESTADÍSTICAS
+# ============================================================
+
+contador_paquetes = 0
+contador_validos = 0
+contador_invalidos = 0
+
+ultimo_numero_valido = None
+total_perdidos = 0
+
+niveles = []
 
 
 # ============================================================
@@ -533,287 +271,156 @@ buffer_rx = np.zeros(
 # ============================================================
 
 try:
-
     while True:
-
-        resultado = sdr.readStream(
-            stream,
-            [buffer_rx],
-            MUESTRAS_RX
-        )
+        resultado = sdr.readStream(stream, [buffer_rx], MUESTRAS_RX)
 
         if resultado.ret < 0:
-
-            print(
-                f"Error RX: {resultado.ret}"
-            )
-
+            print(f"Error RX: {resultado.ret}")
             continue
 
         cantidad = resultado.ret
-
         if cantidad == 0:
             continue
 
-        muestras = buffer_rx[
-            :cantidad
-        ].copy()
+        nuevas_muestras = buffer_rx[:cantidad].copy()
+        muestras = np.concatenate((buffer_acumulado, nuevas_muestras))
 
-        nivel_maximo = np.max(
-            np.abs(muestras)
-        )
+        # ----------------------------------------------------
+        # Mantener cola
+        # ----------------------------------------------------
+        if len(muestras) > MUESTRAS_TRAMA:
+            buffer_acumulado = muestras[-MUESTRAS_TRAMA:]
+        else:
+            buffer_acumulado = muestras
 
+        # ----------------------------------------------------
+        # Detectar actividad
+        # ----------------------------------------------------
+        nivel_maximo = np.max(np.abs(muestras))
         if nivel_maximo < UMBRAL_NIVEL:
             continue
 
-        print()
-        print("Señal detectada.")
-
-        (
-            correlacion,
-            inicio
-        ) = buscar_preambulo(
-            muestras
-        )
+        # ----------------------------------------------------
+        # Buscar preámbulo
+        # ----------------------------------------------------
+        correlacion, inicio = buscar_preambulo(muestras)
 
         if correlacion is None:
-
-            print(
-                "No se encontró preámbulo."
-            )
-
             continue
-
-        print(
-            f"Correlación: {correlacion:.3f}"
-        )
-
-        print(
-            f"Inicio: {inicio}"
-        )
-
         if correlacion < UMBRAL_CORRELACION:
-
-            print(
-                "Correlación inferior "
-                "al umbral."
-            )
-
             continue
 
-        resultado_trama = analizar_trama(
-            muestras,
-            inicio
-        )
+        # ----------------------------------------------------
+        # Analizar trama
+        # ----------------------------------------------------
+        resultado_trama = analizar_trama(muestras, inicio)
 
         if resultado_trama is None:
-
-            print(
-                "No hay suficientes muestras "
-                "para analizar la trama."
-            )
-
+            buffer_acumulado = muestras[inicio:]
             continue
 
+        # ----------------------------------------------------
+        # Recuperar datos
+        # ----------------------------------------------------
+        bits_datos = resultado_trama["bits_datos"]
+        datos_rx = np.packbits(bits_datos).tobytes()
 
-        # ====================================================
-        # RECUPERAR PAQUETE
-        # ====================================================
+        nivel_db = resultado_trama["nivel_db"]
+        freq_offset = resultado_trama["frecuencia_offset"]
 
-        bits_datos = resultado_trama[
-            "bits_datos"
-        ]
-
-        errores_datos = np.sum(
-            bits_datos != bits_esperados
-        )
-
-        datos_rx = np.packbits(
-            bits_datos
-        ).tobytes()
-
-
-        # ====================================================
-        # RESULTADO
-        # ====================================================
-
-        print()
-        print("============================================")
-        print("RESULTADO")
-        print("============================================")
-
-        print(
-            f"Preámbulo recibido: "
-            f"{resultado_trama['bits_preambulo']}"
-        )
-
-        print(
-            f"Errores preámbulo: "
-            f"{resultado_trama['errores_preambulo']}"
-        )
-
-        print()
-
-        print(
-            f"Chips DSSS recibidos: "
-            f"{resultado_trama['chips_recibidos']}"
-        )
-
-        print()
-
-        print(
-            "Bits de datos recuperados:"
-        )
-
-        print(
-            "".join(
-                str(int(bit))
-                for bit in bits_datos
-            )
-        )
-
-        print()
-
-        print(
-            f"Errores de bits DSSS: "
-            f"{errores_datos}/80"
-        )
-
-        print()
-
-        print(
-            f"Bytes esperados: "
-            f"{datos_esperados.hex()}"
-        )
-
-        print(
-            f"Bytes recibidos: "
-            f"{datos_rx.hex()}"
-        )
-
-        print()
-
-        try:
-
-            print(
-                "Paquete interpretado:"
-            )
-
-            print(
-                describir_paquete(
-                    datos_rx
-                )
-            )
-
-        except ValueError as e:
-
-            print(
-                f"Error interpretando paquete: {e}"
-            )
-
-        print()
-
-        print(
-            f"Fase inicial: "
-            f"{np.degrees(resultado_trama['fase_inicial']):+.1f} grados"
-        )
-
-        print(
-            f"Variación de fase: "
-            f"{np.degrees(resultado_trama['pendiente_fase']):+.3f} "
-            f"grados/chip"
-        )
-
-        print(
-            f"Offset de frecuencia: "
-            f"{resultado_trama['frecuencia_offset']:+.1f} Hz"
-        )
-
-        print()
+        niveles.append(nivel_db)
+        contador_paquetes += 1
 
         # ----------------------------------------------------
-        # Correlaciones DSSS
+        # Validar paquete + detectar pérdidas por número de secuencia
         # ----------------------------------------------------
+        paquete_valido = validar_paquete(datos_rx)
+        perdidos = 0
+        numero_pkt = None
 
-        correlaciones = (
-            resultado_trama[
-                "correlaciones_dsss"
-            ]
-        )
+        if paquete_valido:
+            contador_validos += 1
+            estado = "VALIDO"
+            numero_pkt, _, _, _ = interpretar_paquete(datos_rx)
 
-        print(
-            f"Correlación DSSS mínima: "
-            f"{np.min(np.abs(correlaciones)):.2f}"
-        )
+            if ultimo_numero_valido is not None and numero_pkt > ultimo_numero_valido:
+                perdidos = numero_pkt - ultimo_numero_valido - 1
+                total_perdidos += perdidos
 
-        print(
-            f"Correlación DSSS máxima: "
-            f"{np.max(np.abs(correlaciones)):.2f}"
-        )
-
-        print()
-
-        print("Correlaciones DSSS:")
-        print("--------------------------------------------")
-
-        print(
-            " ".join(
-                f"{c:+.2f}"
-                for c in correlaciones
-            )
-        )
-
-        print()
-
-        # ----------------------------------------------------
-        # Resultado de la prueba
-        # ----------------------------------------------------
-
-        if (
-            resultado_trama[
-                "errores_preambulo"
-            ] == 0
-            and errores_datos == 0
-        ):
-
-            print(
-                "PRUEBA SUPERADA:"
-            )
-
-            print(
-                "Preámbulo y datos DSSS "
-                "recibidos correctamente."
-            )
-
+            ultimo_numero_valido = numero_pkt
         else:
+            contador_invalidos += 1
+            estado = "INVALIDO"
 
-            print(
-                "PRUEBA NO SUPERADA."
-            )
+        # ----------------------------------------------------
+        # Mostrar paquete — diagnóstico en una sola línea
+        # ----------------------------------------------------
+        nro_str = f"{numero_pkt:06d}" if numero_pkt is not None else "??????"
+        perdidos_str = f"+{perdidos}" if perdidos > 0 else "-"
 
-            print(
-                "El preámbulo fue detectado, "
-                "pero los datos DSSS "
-                "no coinciden."
-            )
+        print(
+            f"#{contador_paquetes:04d} | Nro:{nro_str} | Perd:{perdidos_str:>3s} | "
+            f"Nivel:{nivel_db:6.1f}dB | Corr:{correlacion:.2f} | "
+            f"FOff:{freq_offset:+6.0f}Hz | {estado:8s} | {describir_paquete(datos_rx)}"
+        )
 
-        print()
+        # ----------------------------------------------------
+        # Estadísticas cada 10 paquetes
+        # ----------------------------------------------------
+        if contador_paquetes % 10 == 0:
+            nivel_minimo = min(niveles)
+            nivel_maximo = max(niveles)
+            nivel_promedio = np.mean(niveles)
 
-        time.sleep(0.5)
+            print()
+            print("--------------------------------------------")
+            print("ESTADISTICAS")
+            print("--------------------------------------------")
+            print(f"Paquetes recibidos : {contador_paquetes}")
+            print(f"Paquetes válidos   : {contador_validos}")
+            print(f"Paquetes inválidos : {contador_invalidos}")
+            print(f"Paquetes perdidos  : {total_perdidos} (detectados por salto en Nro)")
+            print(f"Nivel mínimo       : {nivel_minimo:.2f} dB")
+            print(f"Nivel máximo       : {nivel_maximo:.2f} dB")
+            print(f"Nivel promedio     : {nivel_promedio:.2f} dB")
 
+            if contador_paquetes > 0:
+                porcentaje_validos = 100.0 * contador_validos / contador_paquetes
+                print(f"Tasa de paquetes válidos: {porcentaje_validos:.1f} %")
+
+            print("--------------------------------------------")
+            print()
+
+            niveles = []
+
+        # ----------------------------------------------------
+        # Eliminar trama procesada
+        # ----------------------------------------------------
+        buffer_acumulado = muestras[inicio + MUESTRAS_TRAMA:]
 
 except KeyboardInterrupt:
+    print()
+    print("============================================")
+    print("ENSAYO FINALIZADO")
+    print("============================================")
+    print(f"Paquetes recibidos : {contador_paquetes}")
+    print(f"Paquetes válidos   : {contador_validos}")
+    print(f"Paquetes inválidos : {contador_invalidos}")
+    print(f"Paquetes perdidos  : {total_perdidos} (detectados por salto en Nro)")
+
+    if contador_paquetes > 0:
+        porcentaje_validos = 100.0 * contador_validos / contador_paquetes
+        print(f"Tasa de paquetes válidos: {porcentaje_validos:.1f} %")
+
+    if len(niveles) > 0:
+        print()
+        print(f"Nivel mínimo restante: {min(niveles):.2f} dB")
+        print(f"Nivel máximo restante: {max(niveles):.2f} dB")
+        print(f"Nivel promedio restante: {np.mean(niveles):.2f} dB")
 
     print()
     print("RX detenido.")
 
-
 finally:
-
-    sdr.deactivateStream(
-        stream
-    )
-
-    sdr.closeStream(
-        stream
-    )
+    sdr.deactivateStream(stream)
+    sdr.closeStream(stream)

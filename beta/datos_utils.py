@@ -2,21 +2,48 @@ import numpy as np
 import serial
 
 from paquete import (
-    generar_datos_ejemplo,    # antes: generar_paquete_ejemplo
-    TAMAÑO_DATOS_BYTES         # antes: TAMAÑO_PAQUETE_BYTES
+    generar_paquete_ejemplo,
+    TAMAÑO_PAQUETE_BYTES
 )
 
-def cargar_datos(origen="ejemplo", conexion=None):
+
+def cargar_datos(
+    origen="ejemplo",
+    conexion=None
+):
+
     if origen == "ejemplo":
-        datos = generar_datos_ejemplo(aleatorio=False)
+
+        datos = generar_paquete_ejemplo(
+            aleatorio=False
+        )
+
     elif origen == "aleatorio":
-        datos = generar_datos_ejemplo(aleatorio=True)
+
+        datos = generar_paquete_ejemplo(
+            aleatorio=True
+        )
+
     elif origen == "serial":
+
         if conexion is None:
-            raise ValueError("Necesitás pasar una conexión serial (parámetro conexion)")
-        datos = leer_datos_serial(conexion, TAMAÑO_DATOS_BYTES)
+
+            raise ValueError(
+                "Necesitás pasar una conexión serial "
+                "(parámetro conexion)"
+            )
+
+        datos = leer_datos_serial(
+            conexion,
+            TAMAÑO_PAQUETE_BYTES
+        )
+
     else:
-        raise ValueError(f"Origen desconocido: {origen}")
+
+        raise ValueError(
+            f"Origen desconocido: {origen}"
+        )
+
     return datos
 
 

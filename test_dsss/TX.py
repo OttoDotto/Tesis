@@ -1,10 +1,10 @@
-import time
 import numpy as np
 import SoapySDR
 
 from SoapySDR import (
     SOAPY_SDR_TX,
-    SOAPY_SDR_CF32
+    SOAPY_SDR_CF32,
+    SOAPY_SDR_END_BURST
 )
 
 from config import (
@@ -310,12 +310,19 @@ try:
         f"{offset} muestras"
     )
 
+    # Cerramos la ráfaga explícitamente: enviamos un buffer
+    # vacío con la flag END_BURST para que el USRP sepa que
+    # no hay más datos y no intente sostener/repetir el
+    # último bloque.
+    sdr.writeStream(
+        stream,
+        [np.zeros(1, dtype=np.complex64)],
+        1,
+        flags=SOAPY_SDR_END_BURST
+    )
+
     print()
     print("TX terminado.")
-    print("Presioná Ctrl+C para salir.")
-
-    while True:
-        time.sleep(1)
 
 except KeyboardInterrupt:
 
