@@ -1,0 +1,39 @@
+import argparse
+import sys
+from TX import run_tx
+from RX import run_rx
+
+def main():
+    parser = argparse.ArgumentParser(description="Sistema de Telemetría BPSK (UHD/HackRF)")
+    
+    # Argumentos obligatorios
+    parser.add_argument('-m', '--mode', type=str, choices=['tx', 'rx'], required=True, 
+                        help="Modo de operación: 'tx' o 'rx'")
+    parser.add_argument('-d', '--driver', type=str, choices=['uhd', 'hackrf'], required=True, 
+                        help="SDR a utilizar: 'uhd' (Ettus) o 'hackrf'")
+    parser.add_argument('-a', '--antenna', type=str, required=True, 
+                        help="Antena a utilizar (ej. 'TX/RX', 'RX2', 'RX', 'TX')")
+    parser.add_argument('-g', '--gain', type=int, required=True, 
+                        help="Ganancia general a configurar en el SDR (ej. 40)")
+
+    args = parser.parse_args()
+
+    driver_str = f"driver={args.driver}"
+    antena_str = args.antenna
+    ganancia_str = args.gain
+
+    print("============================================")
+    print("INICIANDO SISTEMA SDR")
+    print(f"Modo    : {args.mode.upper()}")
+    print(f"Driver  : {driver_str}")
+    print(f"Antena  : {antena_str}")
+    print(f"Ganancia: {ganancia_str}")
+    print("============================================\n")
+
+    if args.mode == 'tx':
+        run_tx(driver_str, antena_str, ganancia_str)
+    elif args.mode == 'rx':
+        run_rx(driver_str, antena_str, ganancia_str)
+
+if __name__ == "__main__":
+    main()
