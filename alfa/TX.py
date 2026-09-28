@@ -1,5 +1,6 @@
 import time
 import numpy as np
+from datetime import datetime
 
 from config import (
     FREQ_CENTRAL, SAMPLE_RATE, CANAL_SDR, 
@@ -56,7 +57,10 @@ def run_tx(sdr_args, antena_tx, ganancia_tx):
             
             paquetes_enviados += 1
             
-            print(f"--- Transmitiendo Paquete {paquetes_enviados} ---")
+            # Marca de tiempo de salida (TX)
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+            print(f"[{timestamp}] --- Transmitiendo Paquete {paquetes_enviados} ---")
             print(f"Valores : {describir_paquete(datos)}")
             print(f"Bytes   : {datos.hex()}")
             
@@ -69,7 +73,8 @@ def run_tx(sdr_args, antena_tx, ganancia_tx):
                     break
                 offset += resultado.ret
 
-            print(f"> Paquete enviado. Transmitiendo {TIEMPO_SILENCIO_TX}s de silencio para mantener link...\n")
+            timestamp_fin = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            print(f"[{timestamp_fin}] > Paquete enviado. Transmitiendo {TIEMPO_SILENCIO_TX}s de silencio para mantener link...\n")
             
             # 4. Transmitir el silencio (Híbrido HackRF / UHD)
             if 'hackrf' in sdr_args.lower():

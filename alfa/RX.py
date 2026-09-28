@@ -1,4 +1,5 @@
 import numpy as np
+from datetime import datetime
 
 from config import (
     FREQ_CENTRAL, SAMPLE_RATE, CANAL_SDR, 
@@ -61,9 +62,6 @@ def run_rx(sdr_args, antena_rx, ganancia_rx):
             nivel_medio = np.mean(magnitud)
             nivel_maximo = np.max(magnitud)
 
-            # DEBUG: Imprime el nivel máximo cada vez que lee el buffer para calibrar
-            # print(f"DEBUG SDR - Max: {nivel_maximo:.4f} | Ruido: {nivel_medio:.4f}")
-
             # 1. Filtro estático y de piso de ruido
             if nivel_maximo < max(UMBRAL_NIVEL, nivel_medio * FACTOR_RUIDO_ESTATICO):
                 continue
@@ -91,7 +89,10 @@ def run_rx(sdr_args, antena_rx, ganancia_rx):
             # SOLUCIÓN HACKRF: Eliminar el DC offset para centrar la señal en (0,0) antes de correlacionar
             muestras_ventana = muestras_ventana - np.mean(muestras_ventana)
 
-            print(f"\nSeñal detectada. Max: {nivel_maximo:.3f} | Ruido: {nivel_medio:.3f} | Índice: {inicio_burst}")
+            # Marca de tiempo de llegada (RX)
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+            print(f"\n[{timestamp}] Señal detectada. Max: {nivel_maximo:.3f} | Ruido: {nivel_medio:.3f} | Índice: {inicio_burst}")
             
             # 4. Procesamiento matemático sobre la ventana
             correlacion, inicio_relativo, f_shift_grueso = buscar_preambulo(muestras_ventana)
@@ -100,10 +101,10 @@ def run_rx(sdr_args, antena_rx, ganancia_rx):
                 continue
 
             if correlacion < UMBRAL_CORRELACION:
-                print(f"Correlación descartada: {correlacion:.3f} (Inferior al umbral)")
+                # print(f"[{timestamp}] Correlación descartada: {correlacion:.3f} (Inferior al umbral)")
                 continue
 
-            print(f"Correlación: {correlacion:.3f} | Inicio: {inicio_relativo} | Shift FFT: {f_shift_grueso:.1f} Hz")
+            print(f"[{timestamp}] Correlación: {correlacion:.3f} | Inicio: {inicio_relativo} | Shift FFT: {f_shift_grueso:.1f} Hz")
 
             # Es vital pasar el f_shift_grueso a la función de análisis
             resultado_trama = analizar_trama(muestras_ventana, inicio_relativo, f_shift_grueso)
@@ -120,7 +121,7 @@ def run_rx(sdr_args, antena_rx, ganancia_rx):
             datos_rx = np.packbits(bits).tobytes()
 
             print("\n============================================")
-            print("RESULTADO")
+            print(f"RESULTADO [{timestamp}]")
             print("============================================")
             print(f"Preámbulo recibido: {resultado_trama['bits_preambulo']}")
             print(f"Errores preámbulo: {resultado_trama['errores_preambulo']}\n")

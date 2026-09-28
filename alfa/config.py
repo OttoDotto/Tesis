@@ -34,7 +34,7 @@ MUESTRAS_POR_BIT = 8
 # ============================================================
 
 UMBRAL_NIVEL = 0.015
-UMBRAL_CORRELACION = 0.45
+UMBRAL_CORRELACION = 0.75
 
 # ============================================================
 # DETECCIÓN DE ENERGÍA Y ENVENTANADO (RX)
