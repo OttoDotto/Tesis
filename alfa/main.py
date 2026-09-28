@@ -15,25 +15,30 @@ def main():
                         help="Antena a utilizar (ej. 'TX/RX', 'RX2', 'RX', 'TX')")
     parser.add_argument('-g', '--gain', type=int, required=True, 
                         help="Ganancia general a configurar en el SDR (ej. 40)")
+    # Argumento opcional de depuración
+    parser.add_argument('--debug', action='store_true', 
+                        help="Activar trazas detalladas de bajo nivel (Modo Debug)")
 
     args = parser.parse_args()
 
     driver_str = f"driver={args.driver}"
     antena_str = args.antenna
     ganancia_str = args.gain
+    debug_mode = args.debug
 
     print("============================================")
-    print("INICIANDO SISTEMA SDR")
+    print("INICIANDO SISTEMA SDR DE TELEMETRÍA")
     print(f"Modo    : {args.mode.upper()}")
     print(f"Driver  : {driver_str}")
     print(f"Antena  : {antena_str}")
     print(f"Ganancia: {ganancia_str}")
+    print(f"Debug   : {'ACTIVADO' if debug_mode else 'DESACTIVADO (Modo Limpio)'}")
     print("============================================\n")
 
     if args.mode == 'tx':
-        run_tx(driver_str, antena_str, ganancia_str)
+        run_tx(driver_str, antena_str, ganancia_str, debug=debug_mode)
     elif args.mode == 'rx':
-        run_rx(driver_str, antena_str, ganancia_str)
+        run_rx(driver_str, antena_str, ganancia_str, debug=debug_mode)
 
 if __name__ == "__main__":
     main()

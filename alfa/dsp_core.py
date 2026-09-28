@@ -40,26 +40,28 @@ def buscar_preambulo(muestras):
     referencia = PREAMBULO_SIMBOLOS.astype(np.complex64)
     longitud = len(PREAMBULO)
 
-    # 1. Estimación de offset grueso veloz mediante FFT (Señal al cuadrado)
+    # 1. Estimación de offset grueso veloz mediante FFT
     cuadrada = muestras ** 2
-    cuadrada = cuadrada - np.mean(cuadrada) # Quitar componente continua
+    cuadrada = cuadrada - np.mean(cuadrada)
     
-    # Aplicar ventana Blackman para enfocar la energía y hacer FFT
     ventana = np.blackman(len(cuadrada))
     espectro = np.fft.fft(cuadrada * ventana)
     freqs = np.fft.fftfreq(len(cuadrada), d=1.0/SAMPLE_RATE)
     
-    # Anular el bin central exacto para evitar falsos positivos por estática
+    # Acotar búsqueda (+/- 40 kHz) para evitar falsos positivos
+    limite_freq = 40e3
+    mascara = (freqs >= -limite_freq) & (freqs <= limite_freq)
+    
+    espectro[~mascara] = 0
     espectro[0] = 0 
     
-    # El pico del espectro indica exactamente el DOBLE del offset de frecuencia
     f_shift_grueso = freqs[np.argmax(np.abs(espectro))] / 2.0
 
-    # 2. Des-rotar toda la ventana matemáticamente con el offset descubierto
+    # 2. Des-rotar toda la ventana con el offset descubierto
     t = np.arange(len(muestras)) / SAMPLE_RATE
     muestras_corregidas = muestras * np.exp(-1j * 2 * np.pi * f_shift_grueso * t)
 
-    # 3. Buscar el inicio exacto (Ahora solo hacemos el barrido de MUESTRAS_POR_BIT una sola vez)
+    # 3. Buscar inicio exacto
     for offset in range(MUESTRAS_POR_BIT):
         muestras_offset = muestras_corregidas[offset:]
         cantidad_simbolos = len(muestras_offset) // MUESTRAS_POR_BIT
@@ -93,6 +95,7 @@ def buscar_preambulo(muestras):
 
     return mejor_correlacion, mejor_inicio, f_shift_grueso
 
+
 def estimar_offset_frecuencia(simbolos_preambulo):
     corregidos = simbolos_preambulo * PREAMBULO_SIMBOLOS
     fases = np.unwrap(np.angle(corregidos))
@@ -116,7 +119,6 @@ def analizar_trama(muestras, inicio, f_shift_grueso):
 
     trama = muestras[inicio:fin]
     
-    # NUEVO: Aplicamos la corrección gruesa ANTES de intentar leer los símbolos
     t = np.arange(len(trama)) / SAMPLE_RATE
     trama = trama * np.exp(-1j * 2 * np.pi * f_shift_grueso * t)
     
@@ -152,55 +154,5 @@ def analizar_trama(muestras, inicio, f_shift_grueso):
         "errores_preambulo": errores_preambulo,
         "pendiente_fase": pendiente_fase,
         "fase_inicial": fase_inicial,
-        "frecuencia_offset": frecuencia_offset_fina + f_shift_grueso # NUEVO: Sumamos ambos offsets para el log
-    }
-
-
-def analizar_trama(muestras, inicio, f_shift_grueso):
-    cantidad_bits = len(PREAMBULO) + CANTIDAD_BITS_DATOS + len(GUARDA)
-    cantidad_muestras = cantidad_bits * MUESTRAS_POR_BIT
-    fin = inicio + cantidad_muestras
-
-    if inicio < 0 or fin > len(muestras):
-        return None
-
-    trama = muestras[inicio:fin]
-    
-    # NUEVO: Aplicamos la corrección gruesa ANTES de intentar leer los símbolos
-    t = np.arange(len(trama)) / SAMPLE_RATE
-    trama = trama * np.exp(-1j * 2 * np.pi * f_shift_grueso * t)
-    
-    bloques = trama.reshape(cantidad_bits, MUESTRAS_POR_BIT)
-    simbolos = np.mean(bloques, axis=1)
-    
-    n_preambulo = len(PREAMBULO)
-    simbolos_preambulo = simbolos[:n_preambulo]
-
-    pendiente_fase, fase_inicial, frecuencia_offset_fina = estimar_offset_frecuencia(simbolos_preambulo)
-    pendiente_por_muestra = pendiente_fase / MUESTRAS_POR_BIT
-    indices = np.arange(len(trama), dtype=np.float64)
-    
-    fase = fase_inicial + pendiente_por_muestra * indices
-    trama_corregida = trama * np.exp(-1j * fase)
-    bloques_corregidos = trama_corregida.reshape(cantidad_bits, MUESTRAS_POR_BIT)
-    simbolos_corregidos = np.mean(bloques_corregidos, axis=1)
-
-    simbolos_preambulo = simbolos_corregidos[:n_preambulo]
-    simbolos_datos = simbolos_corregidos[n_preambulo : n_preambulo + CANTIDAD_BITS_DATOS]
-    simbolos_guarda = simbolos_corregidos[n_preambulo + CANTIDAD_BITS_DATOS:]
-
-    bits_preambulo = "".join("1" if np.real(s) >= 0 else "0" for s in simbolos_preambulo)
-    bits_datos = "".join("1" if np.real(s) >= 0 else "0" for s in simbolos_datos)
-    bits_guarda = "".join("1" if np.real(s) >= 0 else "0" for s in simbolos_guarda)
-
-    errores_preambulo = sum(a != b for a, b in zip(bits_preambulo, PREAMBULO))
-
-    return {
-        "bits_preambulo": bits_preambulo,
-        "bits_datos": bits_datos,
-        "bits_guarda": bits_guarda,
-        "errores_preambulo": errores_preambulo,
-        "pendiente_fase": pendiente_fase,
-        "fase_inicial": fase_inicial,
-        "frecuencia_offset": frecuencia_offset_fina + f_shift_grueso # NUEVO: Sumamos ambos offsets para el log
+        "frecuencia_offset": frecuencia_offset_fina + f_shift_grueso
     }
