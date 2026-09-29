@@ -1,6 +1,7 @@
 # ============================================================
 # FUENTE DE DATOS
 # ============================================================
+
 ORIGEN_DATOS = "aleatorio"
 PUERTO_SERIAL = "/dev/ttyACM0"
 BAUDRATE = 9600
@@ -8,12 +9,14 @@ BAUDRATE = 9600
 # ============================================================
 # ESTRUCTURA DE TRAMA
 # ============================================================
+
 PREAMBULO = "11010011100101101101000110111010"
 GUARDA = "1" * 128
 
 # ============================================================
 # SDR (PARÁMETROS BASE)
 # ============================================================
+
 USAR_SDR = True
 FREQ_CENTRAL = 919.5e6
 SAMPLE_RATE = 1e6
@@ -23,25 +26,30 @@ CANAL_SDR = 0
 # ============================================================
 # BPSK
 # ============================================================
+
 MUESTRAS_POR_BIT = 8
 
 # ============================================================
 # DETECCIÓN ESTÁTICA ORIGINAL
 # ============================================================
-UMBRAL_NIVEL = 0.01
-UMBRAL_CORRELACION = 0.70
+
+UMBRAL_NIVEL = 0.015
+UMBRAL_CORRELACION = 0.75
 
 # ============================================================
 # DETECCIÓN DE ENERGÍA Y ENVENTANADO (RX)
 # ============================================================
-FACTOR_RUIDO_ESTATICO = 3.0
-FACTOR_RUIDO_DINAMICO = 5.0
+
+FACTOR_RUIDO_ESTATICO = 1.5
+FACTOR_RUIDO_DINAMICO = 1.7
 FACTOR_PICO_SEÑAL = 0.4
 MARGEN_PREVIO_RX = 500
 LONGITUD_VENTANA_RX = 4000
 MIN_MUESTRAS_VENTANA = 2000
+LONGITUD_VENTANA_RX = 6000
 
 # ============================================================
 # TRANSMISIÓN CONTINUA (TX)
 # ============================================================
+
 TIEMPO_SILENCIO_TX = 1.0
