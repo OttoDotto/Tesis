@@ -46,7 +46,11 @@ def run_tx(sdr_args, antena_tx, ganancia_tx, debug=False):
             bits_datos_str = "".join(str(bit) for bit in bits_datos)
 
             BITS_TX = PREAMBULO + bits_datos_str + GUARDA
-            senal = generar_bpsk(BITS_TX).astype(np.complex64)
+            senal_bpsk = generar_bpsk(BITS_TX).astype(np.complex64)
+            
+            # NUEVO: Padding soldado al paquete para empujar la señal fuera del búfer de la HackRF
+            padding_seguridad = np.zeros(int(SAMPLE_RATE * 0.05), dtype=np.complex64) # 50ms extras
+            senal = np.concatenate((senal_bpsk, padding_seguridad))
             
             paquetes_enviados += 1
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
