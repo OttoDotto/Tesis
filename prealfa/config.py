@@ -3,25 +3,45 @@
 # ============================================================
 
 ORIGEN_DATOS = "aleatorio"
+
 PUERTO_SERIAL = "/dev/ttyACM0"
+
 BAUDRATE = 9600
+
 
 # ============================================================
 # ESTRUCTURA DE TRAMA
 # ============================================================
 
 PREAMBULO = "11010011100101101101000110111010"
+
 GUARDA = "1" * 128
 
+
 # ============================================================
-# SDR (PARÁMETROS BASE)
+# SDR
 # ============================================================
 
 USAR_SDR = True
+
 FREQ_CENTRAL = 919.5e6
-SAMPLE_RATE = 2e6
+
+SAMPLE_RATE = 1e6
+
+GANANCIA_TX = 40
+
+GANANCIA_RX = 40
+
 MUESTRAS_RX = 200000
+
+SDR_ARGS = "driver=uhd"
+
 CANAL_SDR = 0
+
+ANTENA_TX = "TX/RX"
+
+ANTENA_RX = "TX/RX"
+
 
 # ============================================================
 # BPSK
@@ -29,27 +49,11 @@ CANAL_SDR = 0
 
 MUESTRAS_POR_BIT = 8
 
-# ============================================================
-# DETECCIÓN ESTÁTICA ORIGINAL
-# ============================================================
-
-UMBRAL_NIVEL = 0.015
-UMBRAL_CORRELACION = 0.75
 
 # ============================================================
-# DETECCIÓN DE ENERGÍA Y ENVENTANADO (RX)
+# DETECCIÓN
 # ============================================================
 
-FACTOR_RUIDO_ESTATICO = 1.5
-FACTOR_RUIDO_DINAMICO = 1.7
-FACTOR_PICO_SENAL = 0.4
-MARGEN_PREVIO_RX = 500
-LONGITUD_VENTANA_RX = 4000
-MIN_MUESTRAS_VENTANA = 2000
-LONGITUD_VENTANA_RX = 6000
+UMBRAL_NIVEL = 0.01
 
-# ============================================================
-# TRANSMISIÓN CONTINUA (TX)
-# ============================================================
-
-TIEMPO_SILENCIO_TX = 1.0
+UMBRAL_CORRELACION = 0.70

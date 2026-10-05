@@ -1,49 +1,57 @@
-'''
-Define la estructura y los datos orientados a telemetría táctica (UGV).
-'''
 import random
 import struct
 
+
 # ============================================================
-# ESTRUCTURA DEL PAQUETE DE DATOS (UGV)
+# ESTRUCTURA DEL PAQUETE DE DATOS
 # ============================================================
 
-FORMATO_PAQUETE = "<ffffH"
+FORMATO_PAQUETE = "<ffH"
 
 TAMAÑO_PAQUETE_BYTES = struct.calcsize(
     FORMATO_PAQUETE
 )
 
+
 # ============================================================
-# GENERACION DE PAQUETES
+# GENERACIÓN DE PAQUETES
 # ============================================================
 
 def generar_paquete_ejemplo(aleatorio=False):
 
     if aleatorio:
-        latitud = random.uniform(-34.5000, -34.7000)
-        longitud = random.uniform(-58.3000, -58.5000)
-        velocidad = random.uniform(10.0, 45.0)
-        rumbo = random.uniform(10.0, 90.0)
-        bateria = random.randint(10, 90)
+
+        temperatura = random.uniform(
+            15.0,
+            35.0
+        )
+
+        humedad = random.uniform(
+            30.0,
+            80.0
+        )
+
+        luz = random.randint(
+            0,
+            1023
+        )
+
     else:
-        latitud = -34.6037
-        longitud = -58.3816
-        velocidad = 15.5
-        rumbo = 90.0
-        bateria = 85
+
+        temperatura = 23.5
+        humedad = 60.2
+        luz = 512
 
     return struct.pack(
         FORMATO_PAQUETE,
-        latitud,
-        longitud,
-        velocidad,
-        rumbo,
-        bateria
+        temperatura,
+        humedad,
+        luz
     )
 
+
 # ============================================================
-# INTERPRETACION
+# INTERPRETACIÓN
 # ============================================================
 
 def interpretar_paquete(datos):
@@ -51,7 +59,7 @@ def interpretar_paquete(datos):
     if len(datos) != TAMAÑO_PAQUETE_BYTES:
 
         raise ValueError(
-            f"Paquete invalido: se esperaban "
+            f"Paquete inválido: se esperaban "
             f"{TAMAÑO_PAQUETE_BYTES} bytes, "
             f"se recibieron {len(datos)}"
         )
@@ -61,20 +69,19 @@ def interpretar_paquete(datos):
         datos
     )
 
+
 # ============================================================
-# REPRESENTACION LEGIBLE
+# REPRESENTACIÓN LEGIBLE
 # ============================================================
 
 def describir_paquete(datos):
 
-    latitud, longitud, velocidad, rumbo, bateria = (
+    temperatura, humedad, luz = (
         interpretar_paquete(datos)
     )
 
     return (
-        f"LAT={latitud:.4f} | "
-        f"LON={longitud:.4f} | "
-        f"VEL={velocidad:.1f} km/h | "
-        f"RUMBO={rumbo:.1f} deg | "
-        f"BAT={bateria}%"
+        f"Temperatura={temperatura:.2f} °C | "
+        f"Humedad={humedad:.2f} % | "
+        f"Luz={luz}"
     )
