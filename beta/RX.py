@@ -1,16 +1,22 @@
 import numpy as np
 from datetime import datetime
+from SoapySDR import SOAPY_SDR_OVERFLOW
 
 from config import (
-    FREQ_CENTRAL, SAMPLE_RATE, CANAL_SDR, 
-    UMBRAL_NIVEL, UMBRAL_CORRELACION, MUESTRAS_RX,
-    FACTOR_RUIDO_ESTATICO, FACTOR_RUIDO_DINAMICO,
-    FACTOR_PICO_SENAL, MARGEN_PREVIO_RX, 
-    LONGITUD_VENTANA_RX, MIN_MUESTRAS_VENTANA
+    FREQ_CENTRAL, SAMPLE_RATE, CANAL_SDR, UMBRAL_CORRELACION,
+    MUESTRAS_RX, MARGEN_PREVIO_RX, BLOQUE_LECTURA
 )
-from paquete import TAMAÑO_PAQUETE_BYTES, describir_paquete
-from dsp_core import buscar_preambulo, analizar_trama
+from paquete import describir_paquete, verificar_crc
+from dsp_core import (
+    detectar_rafaga, buscar_preambulo, analizar_trama,
+    N_MUESTRAS_UTILES, N_MUESTRAS_TRAMA
+)
 from sdr_utils import inicializar_sdr, cerrar_sdr
+
+# Muestras que hay que tener desde el inicio de rafaga para poder decodificar
+# (trama + margen previo + holgura por deriva de reloj / busqueda de fase)
+NECESARIAS = MARGEN_PREVIO_RX + N_MUESTRAS_UTILES + 2000
+
 
 def run_rx(sdr_args, antena_rx, ganancia_rx, debug=False):
     if debug:
@@ -25,146 +31,83 @@ def run_rx(sdr_args, antena_rx, ganancia_rx, debug=False):
     else:
         print("\nESPERANDO TELEMETRIA DSSS...\n")
 
-    buffer_rx = np.zeros(MUESTRAS_RX, dtype=np.complex64)
-    sdr = None
-    stream = None
+    assert MUESTRAS_RX > NECESARIAS, "MUESTRAS_RX debe ser mayor que el largo de la trama"
+
+    bloque = np.zeros(BLOQUE_LECTURA, dtype=np.complex64)
+    historial = np.zeros(0, dtype=np.complex64)
+    sdr = stream = None
 
     try:
-        if debug: print("Inicializando SDR...")
         sdr, stream = inicializar_sdr(
-            'RX', sdr_args, SAMPLE_RATE, FREQ_CENTRAL, ganancia_rx, antena_rx, CANAL_SDR
-        )
-
-        # --- NUEVO: Historial para acumular fragmentos del HackRF ---
-        historial_muestras = np.array([], dtype=np.complex64)
-        overlap_size = LONGITUD_VENTANA_RX + MARGEN_PREVIO_RX
+            'RX', sdr_args, SAMPLE_RATE, FREQ_CENTRAL, ganancia_rx, antena_rx, CANAL_SDR)
 
         while True:
-            resultado = sdr.readStream(stream, [buffer_rx], MUESTRAS_RX, timeoutUs=500000)
+            r = sdr.readStream(stream, [bloque], BLOQUE_LECTURA, timeoutUs=500000)
 
-            if resultado.ret < 0:
-                if debug: print(f"Error RX: {resultado.ret}")
+            if r.ret == SOAPY_SDR_OVERFLOW:
+                # Se perdieron muestras: unir lo viejo con lo nuevo crea una
+                # discontinuidad que corrompe cualquier trama que la cruce.
+                historial = historial[:0]
+                if debug: print("Overflow: se descarta el historial")
+                continue
+            if r.ret <= 0:
                 continue
 
-            cantidad = resultado.ret
-            if cantidad == 0:
+            historial = np.concatenate((historial, bloque[:r.ret]))
+            if len(historial) < MUESTRAS_RX:
                 continue
 
-            # 1. Acumular fragmentos entrantes
-            historial_muestras = np.concatenate((historial_muestras, buffer_rx[:cantidad]))
+            ventana = historial - np.mean(historial)
+            ini_rafaga, ruido = detectar_rafaga(ventana)
 
-            # 2. Esperar hasta juntar el bloque completo que necesitamos procesar
-            if len(historial_muestras) < MUESTRAS_RX:
+            if ini_rafaga is None:
+                # nada: conservar solo el final por si una trama empieza ahi
+                historial = historial[-(NECESARIAS):]
                 continue
 
-            # 3. Extraer la ventana de análisis
-            muestras = historial_muestras.copy()
+            ini = max(0, ini_rafaga - MARGEN_PREVIO_RX)
+            if len(ventana) - ini < NECESARIAS:
+                # trama incompleta: esperar mas muestras (antes se descartaba)
+                historial = historial[ini:]
+                continue
 
-            # 4. Guardar el solapamiento (overlap) para no partir un paquete a la mitad
-            historial_muestras = historial_muestras[-overlap_size:]
+            muestras = ventana[ini:ini + NECESARIAS]
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
-            muestras = muestras - np.mean(muestras)
+            corr, inicio, f_cfo = buscar_preambulo(muestras)
+            # La rafaga se consume haya o no decodificado, para no reprocesarla
+            historial = historial[ini + N_MUESTRAS_TRAMA:]
 
-            magnitud = np.abs(muestras)
-            nivel_medio = np.mean(magnitud)
-            nivel_maximo = np.max(magnitud)
-
-            if nivel_maximo < max(UMBRAL_NIVEL, nivel_medio * FACTOR_RUIDO_ESTATICO):
+            if corr is None or corr < UMBRAL_CORRELACION:
                 if debug:
-                    print(
-                        f"Nivel RX | medio={nivel_medio:.5f} "
-                        f"max={nivel_maximo:.5f} "
-                        f"umbral={max(UMBRAL_NIVEL, nivel_medio * FACTOR_RUIDO_ESTATICO):.5f}"
-                    )
+                    c = -1 if corr is None else corr
+                    print(f"[{ts}] Descarta correlacion: {c:.3f} | ruido: {ruido:.4f}")
                 continue
 
-            umbral_disparo = max(nivel_medio * FACTOR_RUIDO_DINAMICO, nivel_maximo * FACTOR_PICO_SENAL)
-            
-            indices_burst = np.where(magnitud > umbral_disparo)[0]
-            if len(indices_burst) == 0:
-                continue
-                
-            inicio_burst = indices_burst[0]
-
-            idx_inicio = max(0, inicio_burst - MARGEN_PREVIO_RX)
-            idx_fin = min(len(muestras), idx_inicio + LONGITUD_VENTANA_RX)
-            
-            muestras_ventana = muestras[idx_inicio:idx_fin]
-
-            if len(muestras_ventana) < MIN_MUESTRAS_VENTANA:
-                if debug: print("Ventana corta, descartando.")
+            res = analizar_trama(muestras, inicio, f_cfo)
+            if res is None:
                 continue
 
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            trama = np.packbits(res["bits"]).tobytes()
+            payload = verificar_crc(trama)
 
-            correlacion, inicio_relativo, f_shift_grueso = buscar_preambulo(muestras_ventana)
-
-            if correlacion is None:
-                continue
-
-            if correlacion < UMBRAL_CORRELACION:
-                if debug:
-                    print(
-                        f"[{timestamp}] "
-                        f"Descarta correlacion: {correlacion:.3f} | "
-                        f"Max: {nivel_maximo:.3f} | "
-                        f"Ruido: {nivel_medio:.3f} | "
-                        f"Fshift: {f_shift_grueso/1e3:+.2f} kHz"
-                    )
-                continue
-
-            resultado_trama = analizar_trama(muestras_ventana, inicio_relativo, f_shift_grueso)
-
-            if resultado_trama is None:
-                continue
-
-            bits = np.array([int(b) for b in resultado_trama["bits_datos"]], dtype=np.uint8)
-            datos_rx = np.packbits(bits).tobytes()
-
-            # Validacion del CRC a traves de la funcion interpretar_paquete / describir_paquete
-            try:
-                describir_paquete(datos_rx)
-                crc_valido = True
-            except Exception:
-                crc_valido = False
-
-            # El paquete es valido solo si no hay errores de preambulo, el tamano es correcto y el CRC pasa
-            es_valido = (
-                resultado_trama["errores_preambulo"] == 0 and 
-                len(datos_rx) == TAMAÑO_PAQUETE_BYTES and 
-                crc_valido
-            )
-
-            if not debug and not es_valido:
-                continue
-
-            if not debug:
-                try:
-                    valores = describir_paquete(datos_rx)
-                    print(f"[{timestamp}] RX -> {valores}")
-                except Exception:
-                    pass
-            else:
+            if debug:
                 print("\n============================================")
-                print(f"RESULTADO [{timestamp}]")
+                print(f"RESULTADO [{ts}]")
                 print("============================================")
-                print(f"Preambulo recibido: {resultado_trama['bits_preambulo']}")
-                print(f"Errores preambulo : {resultado_trama['errores_preambulo']}")
-                print(f"Bytes recibidos   : {datos_rx.hex()}")
-                
-                try:
-                    print(f"Valores interpretados: {describir_paquete(datos_rx)}")
-                except Exception as e:
-                    print(f"Error formato struct o CRC: {e}")
-
-                print(f"Fase inicial: {np.degrees(resultado_trama['fase_inicial']):+.1f} grados")
-                print(f"Var. fase   : {np.degrees(resultado_trama['pendiente_fase']):+.3f} grados/simbolo")
-                print(f"Offset frec : {resultado_trama['frecuencia_offset']:+.1f} Hz")
-
-                if es_valido:
-                    print("ESTADO: OK (TRAMA VALIDA Y CRC CORRECTO)\n")
+                print(f"Correlacion preambulo: {corr:.3f}")
+                print(f"Errores preambulo    : {res['errores_preambulo']}")
+                print(f"Offset frecuencia    : {res['frecuencia_offset']:+.1f} Hz")
+                print(f"Calidad despreading  : {res['calidad']:.2f}")
+                print(f"Bytes recibidos      : {trama.hex()}")
+                if payload is not None:
+                    print(f"Valores: {describir_paquete(payload)}")
+                    print("ESTADO: OK (CRC valido)\n")
                 else:
-                    print("ESTADO: FALLO (BASURA DESCARTADA POR CRC O RUIDO)\n")
+                    print("ESTADO: FALLO (CRC invalido, descartado)\n")
+            elif payload is not None:
+                print(f"[{ts}] RX -> {describir_paquete(payload)}")
+            # sin CRC valido en modo limpio: no se imprime nada (basura descartada)
 
     except KeyboardInterrupt:
         print("\nRX detenido.")
