@@ -1,190 +1,191 @@
 import numpy as np
 from config import (
-    PREAMBULO,
-    GUARDA,
-    MUESTRAS_POR_BIT,
-    SAMPLE_RATE
+    PREAMBULO, GUARDA, MUESTRAS_POR_BIT, SAMPLE_RATE, FREQ_CENTRAL,
+    CFO_MAX_HZ, AMPLITUD_TX
 )
-from paquete import TAMAÑO_PAQUETE_BYTES
-from funciones_dsss import generar_codigo_pn, ensanchar, despreader
+from paquete import TAMAÑO_TRAMA_BYTES
+from funciones_dsss import generar_codigo_pn, ensanchar
 
+# ------------------------------------------------------------
 # Constantes derivadas
-CANTIDAD_BITS_DATOS = TAMAÑO_PAQUETE_BYTES * 8
+# ------------------------------------------------------------
+CANTIDAD_BITS_DATOS = TAMAÑO_TRAMA_BYTES * 8          # payload + CRC
 
-# Parámetros del código PN clásico (LFSR)
 TAPS_PN = [6, 1]
 LONGITUD_PN = 63
 PN_BIPOLAR = generar_codigo_pn(TAPS_PN, LONGITUD_PN)
 
-# Cantidad total de chips de datos ensanchados
 CANTIDAD_CHIPS_DATOS = CANTIDAD_BITS_DATOS * LONGITUD_PN
+N_PREAMBULO = len(PREAMBULO)
 
 PREAMBULO_SIMBOLOS = np.array(
-    [1.0 if bit == "1" else -1.0 for bit in PREAMBULO],
-    dtype=np.float32
-)
-
+    [1.0 if b == "1" else -1.0 for b in PREAMBULO], dtype=np.float32)
 GUARDA_SIMBOLOS = np.array(
-    [1.0 if bit == "1" else -1.0 for bit in GUARDA],
-    dtype=np.float32
-)
+    [1.0 if b == "1" else -1.0 for b in GUARDA], dtype=np.float32)
+
+# Muestras que RX necesita (preambulo + datos; la guarda no hace falta)
+N_SIMBOLOS_UTILES = N_PREAMBULO + CANTIDAD_CHIPS_DATOS
+N_MUESTRAS_UTILES = N_SIMBOLOS_UTILES * MUESTRAS_POR_BIT
+N_MUESTRAS_TRAMA = (N_SIMBOLOS_UTILES + len(GUARDA)) * MUESTRAS_POR_BIT
 
 # ============================================================
-# FUNCIONES TX (DSSS)
+# TX
 # ============================================================
 
 def generar_trama_dsss(bits_datos):
-    # 1. Ensanchar los bits de datos utilizando el código PN clásico
-    chips_datos = ensanchar(bits_datos, PN_BIPOLAR)
-    
-    # 2. Construir la trama: Preámbulo (puro) + Chips de Datos + Guarda (puro)
-    trama_bipolar = np.concatenate((PREAMBULO_SIMBOLOS, chips_datos.astype(np.float32), GUARDA_SIMBOLOS))
-    
-    # 3. Aplicar sobremuestreo (MUESTRAS_POR_BIT) a toda la forma de onda
-    return np.repeat(trama_bipolar, MUESTRAS_POR_BIT)
-
+    chips = ensanchar(bits_datos, PN_BIPOLAR)
+    trama = np.concatenate((PREAMBULO_SIMBOLOS, chips.astype(np.float32), GUARDA_SIMBOLOS))
+    return np.repeat(trama, MUESTRAS_POR_BIT) * AMPLITUD_TX
 
 # ============================================================
-# FUNCIONES RX
+# RX
 # ============================================================
+
+def detectar_rafaga(muestras, desde=0):
+    """
+    Devuelve (indice_inicio, nivel_ruido) o (None, nivel_ruido).
+    Usa nivel suavizado (promedio movil) para ignorar picos de ruido sueltos
+    y un piso de ruido robusto (percentil 10) en vez de un umbral absoluto fijo.
+    """
+    from config import UMBRAL_NIVEL, FACTOR_UMBRAL_RAFAGA, SUAVIZADO_RAFAGA
+    mag = np.abs(muestras)
+    L = SUAVIZADO_RAFAGA
+    cs = np.cumsum(np.concatenate(([0.0], mag)), dtype=np.float64)
+    suave = (cs[L:] - cs[:-L]) / L                    # suave[i] = media de mag[i:i+L]
+    ruido = float(np.percentile(suave[::8], 10))
+    umbral = max(UMBRAL_NIVEL, ruido * FACTOR_UMBRAL_RAFAGA)
+    idx = np.where(suave[desde:] > umbral)[0]
+    if len(idx) == 0:
+        return None, ruido
+    return desde + int(idx[0]), ruido
+
+
+def estimar_cfo_grueso(muestras):
+    """
+    BPSK/DSSS con chips +-1: al elevar al cuadrado la modulacion desaparece y
+    queda un tono a 2*f. FFT de TODA la ventana (zero-padded) -> resolucion ~8 Hz.
+    Rango de busqueda: +-CFO_MAX_HZ (en el dominio del cuadrado: +-2*CFO_MAX_HZ).
+    """
+    cuad = muestras.astype(np.complex128) ** 2
+    nfft = 1 << int(np.ceil(np.log2(len(cuad))))
+    esp = np.abs(np.fft.fft(cuad, nfft))
+    freqs = np.fft.fftfreq(nfft, d=1.0 / SAMPLE_RATE)
+    esp[np.abs(freqs) > 2.0 * CFO_MAX_HZ] = 0.0
+    k = int(np.argmax(esp))
+    # interpolacion parabolica del pico
+    if 0 < k < nfft - 1 and esp[k - 1] > 0 and esp[k + 1] > 0:
+        a, b, c = np.log(esp[k - 1] + 1e-30), np.log(esp[k] + 1e-30), np.log(esp[k + 1] + 1e-30)
+        den = a - 2 * b + c
+        delta = 0.5 * (a - c) / den if den != 0 else 0.0
+    else:
+        delta = 0.0
+    return (freqs[k] + delta * (freqs[1] - freqs[0])) / 2.0
+
+
+def periodo_chip(f_cfo):
+    """
+    Largo del chip en muestras RX. Si TX y RX derivan LO y reloj de muestreo de un
+    mismo cristal (B200 y HackRF lo hacen), el error en ppm del reloj es el mismo
+    que el del portador: ppm = f_cfo / fc.
+    """
+    return MUESTRAS_POR_BIT * (1.0 - f_cfo / FREQ_CENTRAL)
+
+
+def integrar_simbolos(x, inicio, n_simb, T):
+    """Integrate & dump con periodo fraccionario T (compensa deriva de reloj)."""
+    cs = np.concatenate(([0.0 + 0j], np.cumsum(x, dtype=np.complex128)))
+    bordes = inicio + T * np.arange(n_simb + 1)
+    pos = np.arange(len(cs))
+    c = np.interp(bordes, pos, cs.real) + 1j * np.interp(bordes, pos, cs.imag)
+    return (c[1:] - c[:-1]) / T
+
 
 def buscar_preambulo(muestras):
+    """Devuelve (correlacion, inicio_fraccional, f_cfo) o (None, None, None)."""
     muestras = muestras - np.mean(muestras)
-    
-    mejor_correlacion = -1.0
-    mejor_inicio = None
-    referencia = PREAMBULO_SIMBOLOS.astype(np.complex64)
-    longitud = len(PREAMBULO)
-
-    # Evita el Overrun (OOOO) procesando solo el inicio de la ráfaga
-    N_fft = 1024
-    muestras_fft = muestras[:N_fft]
-    cuadrada = muestras_fft ** 2
-    cuadrada = cuadrada - np.mean(cuadrada)
-    
-    ventana = np.blackman(len(cuadrada))
-    espectro = np.fft.fft(cuadrada * ventana)
-    freqs = np.fft.fftfreq(len(cuadrada), d=1.0/SAMPLE_RATE)
-    
-    espectro_abs = np.abs(espectro)
-    frecuencia_limite = 40000 
-    espectro_abs[np.abs(freqs) > frecuencia_limite] = 0
-    espectro_abs[0] = 0 
-    
-    f_shift_grueso = freqs[np.argmax(espectro_abs)] / 2.0
-
+    f_cfo = estimar_cfo_grueso(muestras)
     t = np.arange(len(muestras)) / SAMPLE_RATE
-    muestras_corregidas = muestras * np.exp(-1j * 2 * np.pi * f_shift_grueso * t)
+    corr_x = muestras * np.exp(-2j * np.pi * f_cfo * t)
+    T = periodo_chip(f_cfo)
 
+    ref = PREAMBULO_SIMBOLOS.astype(np.complex64)
+    L = N_PREAMBULO
+    e_ref = float(np.sum(np.abs(ref) ** 2))
 
-    for offset in range(MUESTRAS_POR_BIT):
-        muestras_offset = muestras_corregidas[offset:]
-        cantidad_simbolos = len(muestras_offset) // MUESTRAS_POR_BIT
-
-        if cantidad_simbolos < longitud:
-            continue
-
-        muestras_offset = muestras_offset[:cantidad_simbolos * MUESTRAS_POR_BIT]
-        bloques = muestras_offset.reshape(cantidad_simbolos, MUESTRAS_POR_BIT)
-        simbolos = np.mean(bloques, axis=1)
-
-        correlaciones = np.correlate(simbolos, referencia, mode="valid")
-        energia_rx = np.convolve(
-            np.abs(simbolos) ** 2,
-            np.ones(longitud, dtype=np.float32),
-            mode="valid"
-        )
-        energia_ref = np.sum(np.abs(referencia) ** 2)
-        denominador = np.sqrt(energia_rx * energia_ref)
-
-        correlaciones_normalizadas = np.abs(correlaciones) / np.maximum(denominador, 1e-12)
-        indice = np.argmax(correlaciones_normalizadas)
-        correlacion = correlaciones_normalizadas[indice]
-
-        if correlacion > mejor_correlacion:
-            mejor_correlacion = correlacion
-            mejor_inicio = offset + indice * MUESTRAS_POR_BIT
-
-    if mejor_inicio is None:
+    mejor, mejor_ini = -1.0, None
+    n_blk = int(len(corr_x) // T) - 1
+    if n_blk < L:
         return None, None, None
 
-    return mejor_correlacion, mejor_inicio, f_shift_grueso
+    # busqueda gruesa: 8 fases enteras
+    for off in range(MUESTRAS_POR_BIT):
+        nsim = (len(corr_x) - off) // MUESTRAS_POR_BIT
+        if nsim < L:
+            continue
+        s = corr_x[off:off + nsim * MUESTRAS_POR_BIT].reshape(nsim, MUESTRAS_POR_BIT).mean(axis=1)
+        c = np.correlate(s, ref, mode="valid")
+        en = np.convolve(np.abs(s) ** 2, np.ones(L, dtype=np.float32), mode="valid")
+        cn = np.abs(c) / np.maximum(np.sqrt(en * e_ref), 1e-12)
+        i = int(np.argmax(cn))
+        if cn[i] > mejor:
+            mejor, mejor_ini = float(cn[i]), off + i * MUESTRAS_POR_BIT
+
+    # refinamiento fraccional (+-0.75 muestra) sobre el preambulo
+    for d in np.arange(-0.75, 0.76, 0.25):
+        ini = mejor_ini + d
+        if ini < 0:
+            continue
+        s = integrar_simbolos(corr_x, ini, L, T)
+        cn = abs(np.vdot(ref, s)) / max(np.sqrt(np.sum(np.abs(s) ** 2) * e_ref), 1e-12)
+        if cn > mejor:
+            mejor, mejor_ini = float(cn), ini
+    return mejor, mejor_ini, f_cfo
 
 
-def estimar_offset_frecuencia(simbolos_preambulo):
-    corregidos = simbolos_preambulo * PREAMBULO_SIMBOLOS
-    fases = np.unwrap(np.angle(corregidos))
-    indices = np.arange(len(fases), dtype=np.float64)
-    pesos = np.maximum(np.abs(corregidos) ** 2, 1e-12)
-
-    pendiente, fase_inicial = np.polyfit(indices, fases, 1, w=pesos)
-    tasa_simbolos = SAMPLE_RATE / MUESTRAS_POR_BIT
-    frecuencia_offset = pendiente * tasa_simbolos / (2.0 * np.pi)
-
-    return pendiente, fase_inicial, frecuencia_offset
-
-
-def analizar_trama(muestras, inicio, f_shift_grueso):
-    cantidad_simbolos_totales = len(PREAMBULO) + CANTIDAD_CHIPS_DATOS + len(GUARDA)
-    cantidad_muestras = cantidad_simbolos_totales * MUESTRAS_POR_BIT
-    fin = inicio + cantidad_muestras
-
-    if inicio < 0 or fin > len(muestras):
+def analizar_trama(muestras, inicio, f_cfo):
+    n_necesarias = int(np.ceil(inicio + (N_SIMBOLOS_UTILES + 1) * periodo_chip(f_cfo)))
+    if inicio < 0 or n_necesarias > len(muestras):
         return None
 
-    trama = muestras[inicio:fin]
-    
-    t = np.arange(len(trama)) / SAMPLE_RATE
-    trama = trama * np.exp(-1j * 2 * np.pi * f_shift_grueso * t)
-    
-    bloques = trama.reshape(cantidad_simbolos_totales, MUESTRAS_POR_BIT)
-    simbolos = np.mean(bloques, axis=1)
-    
-    n_preambulo = len(PREAMBULO)
-    simbolos_preambulo = simbolos[:n_preambulo]
+    muestras = muestras - np.mean(muestras)
+    t = np.arange(len(muestras)) / SAMPLE_RATE
+    x = muestras * np.exp(-2j * np.pi * f_cfo * t)
+    T = periodo_chip(f_cfo)
 
-    pendiente_fase, fase_inicial, frecuencia_offset_fina = estimar_offset_frecuencia(simbolos_preambulo)
-    pendiente_por_muestra = pendiente_fase / MUESTRAS_POR_BIT
-    indices = np.arange(len(trama), dtype=np.float64)
-    
-    fase = fase_inicial + pendiente_por_muestra * indices
-    trama_corregida = trama * np.exp(-1j * fase)
-    bloques_corregidos = trama_corregida.reshape(cantidad_simbolos_totales, MUESTRAS_POR_BIT)
-    simbolos_corregidos = np.mean(bloques_corregidos, axis=1)
+    simb = integrar_simbolos(x, inicio, N_SIMBOLOS_UTILES, T)
 
-    simbolos_preambulo = simbolos_corregidos[:n_preambulo]
-    simbolos_chips_datos = simbolos_corregidos[n_preambulo : n_preambulo + CANTIDAD_CHIPS_DATOS]
+    # --- Seguimiento de fase con el truco del cuadrado (preambulo + chips son +-1) ---
+    # s^2 = A^2 e^{j2phi}: sin modulacion. Promedio movil -> fase lentamente variable.
+    cuad = simb ** 2
+    W = 2 * LONGITUD_PN + 1
+    prom = np.convolve(cuad, np.ones(W) / W, mode="same")
+    fase = 0.5 * np.unwrap(np.angle(prom))
 
-    # --- TRUCO DSP PARA PLANCHAR EL DRIFT DE FASE ---
-    # Al elevar al cuadrado se destruye la modulación de datos y el código PN.
-    # Lo único que sobrevive es el ruido y la rotación de fase residual.
-    chips_cuadrado = simbolos_chips_datos ** 2
-    fase_error_doble = np.unwrap(np.angle(chips_cuadrado))
-    
-    # Ajustar una recta para extraer la pendiente de error e ignorar el ruido
-    idx_chips = np.arange(len(fase_error_doble))
-    pendiente_doble, _ = np.polyfit(idx_chips, fase_error_doble, 1)
-    
-    # Se divide por 2.0 (por el cuadrado previo). 
-    # Forzamos origen 0 para no introducir ambigüedad (inversión de bits)
-    drift_residual = (pendiente_doble / 2.0) * idx_chips
-    
-    # Corregir los chips
-    simbolos_chips_datos = simbolos_chips_datos * np.exp(-1j * drift_residual)
-    # ------------------------------------------------
+    corr = simb * np.exp(-1j * fase)
 
-    # Desensanchado (Despreading) DSSS para recuperar los bits originales
-    bits_recuperados, _ = despreader(simbolos_chips_datos, PN_BIPOLAR)
-    bits_datos = "".join(str(b) for b in bits_recuperados)
-    bits_preambulo = "".join("1" if np.real(s) >= 0 else "0" for s in simbolos_preambulo)
+    # resolver ambiguedad de pi con el preambulo conocido
+    if np.real(np.sum(corr[:N_PREAMBULO] * PREAMBULO_SIMBOLOS)) < 0:
+        corr = -corr
+        fase = fase + np.pi
 
-    errores_preambulo = sum(a != b for a, b in zip(bits_preambulo, PREAMBULO))
+    pre = corr[:N_PREAMBULO]
+    chips = corr[N_PREAMBULO:]
 
+    # --- Despreading vectorizado ---
+    bloques = chips.reshape(CANTIDAD_BITS_DATOS, LONGITUD_PN)
+    corrs = np.real(bloques @ PN_BIPOLAR.astype(np.float64))
+    bits = (corrs > 0).astype(np.uint8)
+
+    bits_pre = "".join("1" if np.real(s) >= 0 else "0" for s in pre)
+    errores_pre = sum(a != b for a, b in zip(bits_pre, PREAMBULO))
+
+    pend = float(np.polyfit(np.arange(len(fase)), fase, 1)[0])
     return {
-        "bits_preambulo": bits_preambulo,
-        "bits_datos": bits_datos,
-        "errores_preambulo": errores_preambulo,
-        "pendiente_fase": pendiente_fase,
-        "fase_inicial": fase_inicial,
-        "frecuencia_offset": frecuencia_offset_fina + f_shift_grueso
+        "bits_preambulo": bits_pre,
+        "bits": bits,
+        "errores_preambulo": errores_pre,
+        "calidad": float(np.mean(np.abs(corrs)) / LONGITUD_PN),
+        "pendiente_fase": pend,
+        "fase_inicial": float(fase[0]),
+        "frecuencia_offset": f_cfo + pend * (SAMPLE_RATE / T) / (2 * np.pi),
     }

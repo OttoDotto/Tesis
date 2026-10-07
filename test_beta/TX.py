@@ -7,7 +7,7 @@ from config import (
     ORIGEN_DATOS, TIEMPO_SILENCIO_TX
 )
 from datos_utils import cargar_datos
-from paquete import describir_paquete, agregar_crc
+from paquete import describir_paquete
 from dsp_core import generar_trama_dsss
 from sdr_utils import inicializar_sdr, cerrar_sdr
 
@@ -41,7 +41,7 @@ def run_tx(sdr_args, antena_tx, ganancia_tx, debug=False):
 
         while True:
             datos = cargar_datos(origen=ORIGEN_DATOS)
-            bits_datos = np.unpackbits(np.frombuffer(agregar_crc(datos), dtype=np.uint8)).astype(int)  # payload + CRC16
+            bits_datos = np.unpackbits(np.frombuffer(datos, dtype=np.uint8)).astype(int)
 
             # Generar trama ensanchada DSSS
             senal_dsss = generar_trama_dsss(bits_datos).astype(np.complex64)
