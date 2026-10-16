@@ -47,16 +47,23 @@ def _encolar(cola, item, stats):
         stats["cola_llena"] += 1
 
 
-def run_rx(sdr_args, antena_rx, ganancia_rx, debug=False):
+def run_rx(sdr_args, antena_rx, ganancia_rx, debug=False, estado=None, detener=None):
+    """
+    estado : objeto opcional (pantalla.EstadoRX). Si se pasa, los resultados se
+             le informan a el en vez de usar print().
+    detener: threading.Event opcional; al activarse, el receptor termina limpio.
+    """
     assert MUESTRAS_RX > NECESARIAS, "MUESTRAS_RX debe ser mayor que el largo de la trama"
 
     historial = np.zeros(0, dtype=np.complex64)
     sdr = stream = None
     cola = queue.Queue(maxsize=COLA_MAX_BLOQUES)
     parar = threading.Event()
+    if detener is None:
+        detener = threading.Event()
     stats = {"overflows": 0, "cola_llena": 0}
     hilo = None
-    validos = descartados = 0
+    validos = descartados = rechazados = 0   # descartados = CRC malo; rechazados = no era un paquete
 
     try:
         print("INICIANDO SDRS...", flush=True)
@@ -81,7 +88,10 @@ def run_rx(sdr_args, antena_rx, ganancia_rx, debug=False):
                                 daemon=True)
         hilo.start()
 
-        while True:
+        if estado is not None:
+            estado.sdr_listo(stats)
+
+        while not detener.is_set():
             try:
                 bloque = cola.get(timeout=0.5)
             except queue.Empty:
@@ -114,10 +124,16 @@ def run_rx(sdr_args, antena_rx, ganancia_rx, debug=False):
             pico = float(np.max(np.abs(historial[ini:ini + NECESARIAS])))
 
             corr, inicio, f_cfo = buscar_preambulo(muestras)
-            historial = historial[ini + N_MUESTRAS_TRAMA:]
+            if corr is not None and corr >= UMBRAL_CORRELACION:
+                # 'inicio' = donde empieza realmente la trama dentro de 'muestras'.
+                # Avanzar hasta su final real evita que el resto de la guarda
+                # se detecte como una rafaga nueva (falso descarte).
+                historial = historial[ini + int(inicio) + N_MUESTRAS_TRAMA:]
+            else:
+                historial = historial[ini + N_MUESTRAS_TRAMA:]
 
             if corr is None or corr < UMBRAL_CORRELACION:
-                descartados += 1
+                rechazados += 1   # ruido / ráfaga que no es un paquete: no cuenta como error
                 if debug:
                     c = -1 if corr is None else corr
                     print(f"[{ts}] Descarta correlacion: {c:.3f} | ruido: {ruido:.4f} | pico: {pico:.2f}")
@@ -134,7 +150,9 @@ def run_rx(sdr_args, antena_rx, ganancia_rx, debug=False):
             else:
                 descartados += 1
 
-            if debug:
+            if estado is not None:
+                estado.trama(ts, payload, corr, res, pico, validos, descartados)
+            elif debug:
                 print("\n============================================")
                 print(f"RESULTADO [{ts}]")
                 print("============================================")
@@ -160,5 +178,6 @@ def run_rx(sdr_args, antena_rx, ganancia_rx, debug=False):
         if hilo is not None:
             hilo.join(timeout=2.0)
         cerrar_sdr(sdr, stream, debug=debug)
-        print(f"Paquetes validos: {validos} | descartados: {descartados} | "
+        print(f"Paquetes validos: {validos} | CRC invalido: {descartados} | "
+              f"rechazados (no eran paquete): {rechazados} | "
               f"overflows: {stats['overflows']} | cola llena: {stats['cola_llena']}")

@@ -2,7 +2,7 @@
 # FUENTE DE DATOS
 # ============================================================
 
-ORIGEN_DATOS = "aleatorio"
+ORIGEN_DATOS = "ejemplo"
 PUERTO_SERIAL = "/dev/ttyACM0"
 BAUDRATE = 9600
 
@@ -50,4 +50,4 @@ UMBRAL_CORRELACION = 0.65     # correlacion normalizada minima del preambulo
 # TRANSMISION CONTINUA (TX)
 # ============================================================
 
-TIEMPO_SILENCIO_TX = 0.3
+TIEMPO_SILENCIO_TX = 1

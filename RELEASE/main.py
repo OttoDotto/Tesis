@@ -16,6 +16,8 @@ def main():
                         help="Ganancia general a configurar en el SDR (ej. 40)")
     parser.add_argument('--debug', action='store_true',
                         help="Activar trazas detalladas de bajo nivel (Modo Debug)")
+    parser.add_argument('--no-ui', action='store_true',
+                        help="RX: no abrir la pantalla, imprimir las tramas por consola")
 
     args = parser.parse_args()
 
@@ -45,7 +47,11 @@ def main():
     if args.mode == 'tx':
         run_tx(driver_str, antena_str, ganancia_str, debug=debug_mode)
     elif args.mode == 'rx':
-        run_rx(driver_str, antena_str, ganancia_str, debug=debug_mode)
+        if debug_mode or args.no_ui:
+            run_rx(driver_str, antena_str, ganancia_str, debug=debug_mode)
+        else:
+            from pantalla import correr_rx_con_pantalla
+            correr_rx_con_pantalla(run_rx, driver_str, antena_str, ganancia_str)
 
 
 if __name__ == "__main__":
