@@ -21,8 +21,6 @@ def run_tx(sdr_args, antena_tx, ganancia_tx, debug=False):
         print(f"Ganancia    : {ganancia_tx}")
         print(f"Antena      : {antena_tx}")
         print(f"Origen datos: {ORIGEN_DATOS}\n")
-    else:
-        print("\nTRANSMITIENDO DSSS...\n")
 
     sdr = None
     stream = None
@@ -32,12 +30,14 @@ def run_tx(sdr_args, antena_tx, ganancia_tx, debug=False):
     silencio = np.zeros(muestras_silencio, dtype=np.complex64)
 
     try:
-        if debug: print("Inicializando SDR...")
+        print("INICIANDO SDRS...", flush=True)
         sdr, stream = inicializar_sdr(
-            'TX', sdr_args, SAMPLE_RATE, FREQ_CENTRAL, ganancia_tx, antena_tx, CANAL_SDR
+            'TX', sdr_args, SAMPLE_RATE, FREQ_CENTRAL, ganancia_tx, antena_tx,
+            CANAL_SDR, debug=debug
         )
-        
-        print("En el aire. Presiona Ctrl+C para salir.\n")
+
+        print("SDR LISTO.")
+        print("\nTRANSMITIENDO DSSS... (Ctrl+C para salir)\n", flush=True)
 
         while True:
             datos = cargar_datos(origen=ORIGEN_DATOS)
@@ -85,4 +85,4 @@ def run_tx(sdr_args, antena_tx, ganancia_tx, debug=False):
     except KeyboardInterrupt:
         print(f"\nTX detenido. Paquetes enviados: {paquetes_enviados}")
     finally:
-        cerrar_sdr(sdr, stream)
+        cerrar_sdr(sdr, stream, debug=debug)

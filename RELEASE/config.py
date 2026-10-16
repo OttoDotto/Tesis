@@ -50,4 +50,4 @@ UMBRAL_CORRELACION = 0.65     # correlacion normalizada minima del preambulo
 # TRANSMISION CONTINUA (TX)
 # ============================================================
 
-TIEMPO_SILENCIO_TX = 0.5
+TIEMPO_SILENCIO_TX = 0.3
