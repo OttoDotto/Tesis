@@ -1,32 +1,63 @@
 import numpy as np
 from config import (
     PREAMBULO, GUARDA, MUESTRAS_POR_BIT, SAMPLE_RATE, FREQ_CENTRAL,
-    CFO_MAX_HZ, AMPLITUD_TX
+    CFO_MAX_HZ, AMPLITUD_TX, USAR_RRC, BETA_RRC, SPAN_CHIPS_RRC
 )
-from paquete import TAMAÑO_TRAMA_BYTES
-from funciones_dsss import generar_codigo_pn, ensanchar
+from paquete import TAMANIO_TRAMA_BYTES
+from funciones_dsss import generar_codigo_pn, ensanchar, filtro_rrc
 
 # ------------------------------------------------------------
 # Constantes derivadas
 # ------------------------------------------------------------
-CANTIDAD_BITS_DATOS = TAMAÑO_TRAMA_BYTES * 8          # payload + CRC
+CANTIDAD_BITS_DATOS = TAMANIO_TRAMA_BYTES * 8          # payload + CRC
 
 TAPS_PN = [6, 1]
 LONGITUD_PN = 63
 PN_BIPOLAR = generar_codigo_pn(TAPS_PN, LONGITUD_PN)
 
 CANTIDAD_CHIPS_DATOS = CANTIDAD_BITS_DATOS * LONGITUD_PN
-N_PREAMBULO = len(PREAMBULO)
 
-PREAMBULO_SIMBOLOS = np.array(
-    [1.0 if b == "1" else -1.0 for b in PREAMBULO], dtype=np.float32)
+# El preambulo ahora es una secuencia de BITS que se ensancha con el mismo PN
+# que los datos (cada bit del preambulo -> LONGITUD_PN chips).
+PREAMBULO_BITS = np.array([int(b) for b in PREAMBULO], dtype=int)
+N_BITS_PREAMBULO = len(PREAMBULO_BITS)
+PREAMBULO_CHIPS = ensanchar(PREAMBULO_BITS, PN_BIPOLAR).astype(np.float32)
+N_CHIPS_PREAMBULO = len(PREAMBULO_CHIPS)              # = N_BITS_PREAMBULO * LONGITUD_PN
+
 GUARDA_SIMBOLOS = np.array(
     [1.0 if b == "1" else -1.0 for b in GUARDA], dtype=np.float32)
 
 # Muestras que RX necesita (preambulo + datos; la guarda no hace falta)
-N_SIMBOLOS_UTILES = N_PREAMBULO + CANTIDAD_CHIPS_DATOS
+N_SIMBOLOS_UTILES = N_CHIPS_PREAMBULO + CANTIDAD_CHIPS_DATOS
 N_MUESTRAS_UTILES = N_SIMBOLOS_UTILES * MUESTRAS_POR_BIT
 N_MUESTRAS_TRAMA = (N_SIMBOLOS_UTILES + len(GUARDA)) * MUESTRAS_POR_BIT
+
+# ------------------------------------------------------------
+# Filtro RRC (pulse shaping en TX / filtro adaptado en RX)
+# ------------------------------------------------------------
+if USAR_RRC:
+    N_TAPS_RRC = SPAN_CHIPS_RRC * MUESTRAS_POR_BIT + 1      # impar -> retardo entero
+    H_RRC = filtro_rrc(BETA_RRC, MUESTRAS_POR_BIT, N_TAPS_RRC)
+    RETARDO_PULSO = (N_TAPS_RRC - 1) // 2   # muestras de cola del filtro tras el ultimo chip
+else:
+    N_TAPS_RRC = 0
+    H_RRC = None
+    RETARDO_PULSO = 0
+
+
+def _filtrar_rrc(x):
+    """Filtro adaptado (mismo RRC que el TX). Salida con el mismo largo que x."""
+    return np.convolve(x, H_RRC, mode="same")
+
+
+def _muestrear_en_pico(xf, inicio, n_simb, T):
+    """
+    Toma 1 valor por chip de la senal ya filtrada, en inicio + k*T (T fraccionario,
+    compensa la deriva de reloj). Con RRC 'inicio' es el instante del PICO del chip 0.
+    """
+    pos = inicio + T * np.arange(n_simb)
+    idx = np.arange(len(xf))
+    return np.interp(pos, idx, xf.real) + 1j * np.interp(pos, idx, xf.imag)
 
 # ============================================================
 # TX
@@ -34,8 +65,17 @@ N_MUESTRAS_TRAMA = (N_SIMBOLOS_UTILES + len(GUARDA)) * MUESTRAS_POR_BIT
 
 def generar_trama_dsss(bits_datos):
     chips = ensanchar(bits_datos, PN_BIPOLAR)
-    trama = np.concatenate((PREAMBULO_SIMBOLOS, chips.astype(np.float32), GUARDA_SIMBOLOS))
-    return np.repeat(trama, MUESTRAS_POR_BIT) * AMPLITUD_TX
+    trama = np.concatenate((PREAMBULO_CHIPS, chips.astype(np.float32), GUARDA_SIMBOLOS))
+    if not USAR_RRC:
+        return np.repeat(trama, MUESTRAS_POR_BIT) * AMPLITUD_TX      # pulso rectangular
+
+    # RRC: impulsos (no repeticion) + convolucion. mode='full' no recorta ningun chip;
+    # el chip k queda centrado en la muestra k*MUESTRAS_POR_BIT + RETARDO_PULSO.
+    up = np.zeros(len(trama) * MUESTRAS_POR_BIT, dtype=np.float32)
+    up[::MUESTRAS_POR_BIT] = trama
+    y = np.convolve(up, H_RRC, mode="full")
+    # Normalizar por el PICO: el RRC tiene picos mayores que los chips y saturaria el DAC
+    return (y / np.max(np.abs(y)) * AMPLITUD_TX).astype(np.float32)
 
 # ============================================================
 # RX
@@ -100,42 +140,79 @@ def integrar_simbolos(x, inicio, n_simb, T):
     return (c[1:] - c[:-1]) / T
 
 
-def buscar_preambulo(muestras):
-    """Devuelve (correlacion, inicio_fraccional, f_cfo) o (None, None, None)."""
+def _correlacion_normalizada(s, ref, e_ref):
+    """
+    Correlacion cruzada normalizada |<s[k:k+L], ref>| / (||s[k:k+L]|| * ||ref||)
+    para todos los desfases k (via FFT: el preambulo ensanchado tiene ~10^3 chips,
+    la correlacion directa seria demasiado lenta).
+    """
+    L = len(ref)
+    n = len(s)
+    nfft = 1 << int(np.ceil(np.log2(n + L)))
+    c = np.fft.ifft(np.fft.fft(s, nfft) * np.conj(np.fft.fft(ref, nfft)))[:n - L + 1]
+    cs = np.concatenate(([0.0], np.cumsum(np.abs(s) ** 2, dtype=np.float64)))
+    en = cs[L:] - cs[:-L]
+    return np.abs(c) / np.maximum(np.sqrt(en * e_ref), 1e-12)
+
+
+def buscar_preambulo(muestras, max_inicio=None):
+    """
+    Devuelve (correlacion, inicio_fraccional, f_cfo) o (None, None, None).
+    El preambulo esta ensanchado con el mismo PN que los datos: se correlaciona
+    contra los N_CHIPS_PREAMBULO chips completos (ganancia de procesamiento
+    LONGITUD_PN x N_BITS_PREAMBULO).
+
+    max_inicio: si se indica, el preambulo solo se busca en los primeros
+    'max_inicio' muestras de la ventana. Como preambulo y datos usan el mismo
+    PN, los datos tienen desfases alineados a bit que se parecen al preambulo
+    (hasta ~0.7-0.9 de correlacion); acotar la zona de busqueda evita engancharse
+    a los datos y, de paso, reduce ~9x el costo de la correlacion.
+    """
     muestras = muestras - np.mean(muestras)
     f_cfo = estimar_cfo_grueso(muestras)
     t = np.arange(len(muestras)) / SAMPLE_RATE
     corr_x = muestras * np.exp(-2j * np.pi * f_cfo * t)
     T = periodo_chip(f_cfo)
 
-    ref = PREAMBULO_SIMBOLOS.astype(np.complex64)
-    L = N_PREAMBULO
+    ref = PREAMBULO_CHIPS.astype(np.complex64)
+    L = N_CHIPS_PREAMBULO
     e_ref = float(np.sum(np.abs(ref) ** 2))
 
-    mejor, mejor_ini = -1.0, None
     n_blk = int(len(corr_x) // T) - 1
     if n_blk < L:
         return None, None, None
 
-    # busqueda gruesa: 8 fases enteras
+    # zona donde se admite que empiece el preambulo
+    zona = corr_x
+    if max_inicio is not None:
+        n_corte = int(max_inicio + (L + 2) * MUESTRAS_POR_BIT + MUESTRAS_POR_BIT) + N_TAPS_RRC
+        zona = corr_x[:n_corte]
+
+    # con RRC: filtro adaptado UNA vez sobre la zona (ya sin CFO)
+    zf = _filtrar_rrc(zona) if USAR_RRC else None
+
+    # busqueda gruesa: MUESTRAS_POR_BIT fases enteras
+    mejor, mejor_ini = -1.0, None
     for off in range(MUESTRAS_POR_BIT):
-        nsim = (len(corr_x) - off) // MUESTRAS_POR_BIT
+        nsim = (len(zona) - off) // MUESTRAS_POR_BIT
         if nsim < L:
             continue
-        s = corr_x[off:off + nsim * MUESTRAS_POR_BIT].reshape(nsim, MUESTRAS_POR_BIT).mean(axis=1)
-        c = np.correlate(s, ref, mode="valid")
-        en = np.convolve(np.abs(s) ** 2, np.ones(L, dtype=np.float32), mode="valid")
-        cn = np.abs(c) / np.maximum(np.sqrt(en * e_ref), 1e-12)
+        if USAR_RRC:
+            s = zf[off::MUESTRAS_POR_BIT]            # 1 muestra por chip, en el pico
+        else:
+            s = zona[off:off + nsim * MUESTRAS_POR_BIT].reshape(nsim, MUESTRAS_POR_BIT).mean(axis=1)
+        cn = _correlacion_normalizada(s, ref, e_ref)
         i = int(np.argmax(cn))
         if cn[i] > mejor:
             mejor, mejor_ini = float(cn[i]), off + i * MUESTRAS_POR_BIT
 
-    # refinamiento fraccional (+-0.75 muestra) sobre el preambulo
+    # refinamiento fraccional (+-0.75 muestra) sobre el preambulo completo
     for d in np.arange(-0.75, 0.76, 0.25):
         ini = mejor_ini + d
         if ini < 0:
             continue
-        s = integrar_simbolos(corr_x, ini, L, T)
+        s = (_muestrear_en_pico(zf, ini, L, T) if USAR_RRC
+             else integrar_simbolos(corr_x, ini, L, T))
         cn = abs(np.vdot(ref, s)) / max(np.sqrt(np.sum(np.abs(s) ** 2) * e_ref), 1e-12)
         if cn > mejor:
             mejor, mejor_ini = float(cn), ini
@@ -143,7 +220,7 @@ def buscar_preambulo(muestras):
 
 
 def analizar_trama(muestras, inicio, f_cfo):
-    n_necesarias = int(np.ceil(inicio + (N_SIMBOLOS_UTILES + 1) * periodo_chip(f_cfo)))
+    n_necesarias = int(np.ceil(inicio + (N_SIMBOLOS_UTILES + 1) * periodo_chip(f_cfo))) + RETARDO_PULSO
     if inicio < 0 or n_necesarias > len(muestras):
         return None
 
@@ -152,7 +229,10 @@ def analizar_trama(muestras, inicio, f_cfo):
     x = muestras * np.exp(-2j * np.pi * f_cfo * t)
     T = periodo_chip(f_cfo)
 
-    simb = integrar_simbolos(x, inicio, N_SIMBOLOS_UTILES, T)
+    if USAR_RRC:
+        simb = _muestrear_en_pico(_filtrar_rrc(x), inicio, N_SIMBOLOS_UTILES, T)
+    else:
+        simb = integrar_simbolos(x, inicio, N_SIMBOLOS_UTILES, T)
 
     # --- Seguimiento de fase con el truco del cuadrado (preambulo + chips son +-1) ---
     # s^2 = A^2 e^{j2phi}: sin modulacion. Promedio movil -> fase lentamente variable.
@@ -163,20 +243,22 @@ def analizar_trama(muestras, inicio, f_cfo):
 
     corr = simb * np.exp(-1j * fase)
 
-    # resolver ambiguedad de pi con el preambulo conocido
-    if np.real(np.sum(corr[:N_PREAMBULO] * PREAMBULO_SIMBOLOS)) < 0:
+    # resolver ambiguedad de pi con el preambulo conocido (ya ensanchado)
+    if np.real(np.sum(corr[:N_CHIPS_PREAMBULO] * PREAMBULO_CHIPS)) < 0:
         corr = -corr
         fase = fase + np.pi
 
-    pre = corr[:N_PREAMBULO]
-    chips = corr[N_PREAMBULO:]
+    pre = corr[:N_CHIPS_PREAMBULO]
+    chips = corr[N_CHIPS_PREAMBULO:]
 
     # --- Despreading vectorizado ---
     bloques = chips.reshape(CANTIDAD_BITS_DATOS, LONGITUD_PN)
     corrs = np.real(bloques @ PN_BIPOLAR.astype(np.float64))
     bits = (corrs > 0).astype(np.uint8)
 
-    bits_pre = "".join("1" if np.real(s) >= 0 else "0" for s in pre)
+    # el preambulo tambien se desensancha: se compara bit a bit con PREAMBULO
+    corrs_pre = np.real(pre.reshape(N_BITS_PREAMBULO, LONGITUD_PN) @ PN_BIPOLAR.astype(np.float64))
+    bits_pre = "".join("1" if c > 0 else "0" for c in corrs_pre)
     errores_pre = sum(a != b for a, b in zip(bits_pre, PREAMBULO))
 
     pend = float(np.polyfit(np.arange(len(fase)), fase, 1)[0])

@@ -3,7 +3,7 @@ import serial
 
 from paquete import (
     generar_paquete_ejemplo,
-    TAMAÑO_PAQUETE_BYTES
+    TAMANIO_PAQUETE_BYTES
 )
 
 
@@ -35,7 +35,7 @@ def cargar_datos(
 
         datos = leer_datos_serial(
             conexion,
-            TAMAÑO_PAQUETE_BYTES
+            TAMANIO_PAQUETE_BYTES
         )
 
     else:

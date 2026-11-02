@@ -9,11 +9,11 @@ import struct
 # ============================================================
 
 FORMATO_PAQUETE = "<ffffH"
-TAMAÑO_PAQUETE_BYTES = struct.calcsize(FORMATO_PAQUETE)
+TAMANIO_PAQUETE_BYTES = struct.calcsize(FORMATO_PAQUETE)
 
 # En el aire viaja: payload + CRC16 (2 bytes)
-TAMAÑO_CRC_BYTES = 2
-TAMAÑO_TRAMA_BYTES = TAMAÑO_PAQUETE_BYTES + TAMAÑO_CRC_BYTES
+TAMANIO_CRC_BYTES = 2
+TAMANIO_TRAMA_BYTES = TAMANIO_PAQUETE_BYTES + TAMANIO_CRC_BYTES
 
 # ============================================================
 # CRC16-CCITT (poly 0x1021, init 0xFFFF)
@@ -33,7 +33,7 @@ def agregar_crc(payload: bytes) -> bytes:
 
 def verificar_crc(trama: bytes):
     """Devuelve el payload si la trama es válida; None si el CRC no cierra."""
-    if len(trama) != TAMAÑO_TRAMA_BYTES:
+    if len(trama) != TAMANIO_TRAMA_BYTES:
         return None
     payload, crc_rx = trama[:-2], int.from_bytes(trama[-2:], "big")
     return payload if crc16_ccitt(payload) == crc_rx else None
@@ -63,9 +63,9 @@ def generar_paquete_ejemplo(aleatorio=False):
 # ============================================================
 
 def interpretar_paquete(datos):
-    if len(datos) != TAMAÑO_PAQUETE_BYTES:
+    if len(datos) != TAMANIO_PAQUETE_BYTES:
         raise ValueError(
-            f"Paquete invalido: se esperaban {TAMAÑO_PAQUETE_BYTES} bytes, "
+            f"Paquete invalido: se esperaban {TAMANIO_PAQUETE_BYTES} bytes, "
             f"se recibieron {len(datos)}"
         )
     return struct.unpack(FORMATO_PAQUETE, datos)

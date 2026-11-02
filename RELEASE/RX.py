@@ -6,16 +6,22 @@ from SoapySDR import SOAPY_SDR_OVERFLOW
 
 from config import (
     FREQ_CENTRAL, SAMPLE_RATE, CANAL_SDR, UMBRAL_CORRELACION,
-    MUESTRAS_RX, MARGEN_PREVIO_RX, BLOQUE_LECTURA
+    MUESTRAS_RX, MARGEN_PREVIO_RX, BLOQUE_LECTURA, SUAVIZADO_RAFAGA
 )
 from paquete import describir_paquete, verificar_crc
 from dsp_core import (
     detectar_rafaga, buscar_preambulo, analizar_trama,
-    N_MUESTRAS_UTILES, N_MUESTRAS_TRAMA
+    N_MUESTRAS_UTILES, N_MUESTRAS_TRAMA, RETARDO_PULSO
 )
 from sdr_utils import inicializar_sdr, cerrar_sdr
 
-NECESARIAS = MARGEN_PREVIO_RX + N_MUESTRAS_UTILES + 2000
+# La rafaga se detecta con una ventana de SUAVIZADO_RAFAGA muestras, asi que el
+# indice detectado puede adelantarse hasta ese largo respecto del inicio real.
+NECESARIAS = MARGEN_PREVIO_RX + SUAVIZADO_RAFAGA + N_MUESTRAS_UTILES + 2000
+
+# El preambulo real empieza entre MARGEN_PREVIO_RX y MARGEN_PREVIO_RX +
+# SUAVIZADO_RAFAGA muestras despues del inicio de la ventana (mas 500 de holgura).
+MAX_INICIO_PREAMBULO = MARGEN_PREVIO_RX + SUAVIZADO_RAFAGA + 500
 
 # Bloques de BLOQUE_LECTURA muestras que pueden esperar en cola (~13 s a 2 Msps)
 COLA_MAX_BLOQUES = 400
@@ -123,12 +129,12 @@ def run_rx(sdr_args, antena_rx, ganancia_rx, debug=False, estado=None, detener=N
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             pico = float(np.max(np.abs(historial[ini:ini + NECESARIAS])))
 
-            corr, inicio, f_cfo = buscar_preambulo(muestras)
+            corr, inicio, f_cfo = buscar_preambulo(muestras, max_inicio=MAX_INICIO_PREAMBULO)
             if corr is not None and corr >= UMBRAL_CORRELACION:
                 # 'inicio' = donde empieza realmente la trama dentro de 'muestras'.
                 # Avanzar hasta su final real evita que el resto de la guarda
                 # se detecte como una rafaga nueva (falso descarte).
-                historial = historial[ini + int(inicio) + N_MUESTRAS_TRAMA:]
+                historial = historial[ini + int(inicio) + N_MUESTRAS_TRAMA + RETARDO_PULSO:]
             else:
                 historial = historial[ini + N_MUESTRAS_TRAMA:]
 
